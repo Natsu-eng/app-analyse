@@ -56,3 +56,89 @@ def scatterplot(df: pd.DataFrame, x: str, y: str, color: Optional[str] = None) -
 
 def boxplot_bivariate(df: pd.DataFrame, x_categ: str, y_numeric: str) -> go.Figure:
 	return px.box(df, x=x_categ, y=y_numeric, points="outliers")
+
+# --- Nouvelles fonctions pour le Machine Learning ---
+
+import plotly.figure_factory as ff
+from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve
+
+def plot_predictions_vs_actual(y_true: pd.Series, y_pred: np.ndarray) -> go.Figure:
+    """Scatter plot des valeurs réelles vs. prédites pour la régression."""
+    fig = px.scatter(
+        x=y_true,
+        y=y_pred,
+        labels={"x": "Valeurs réelles", "y": "Valeurs prédites"},
+        title="Réel vs. Prédit",
+        trendline="ols",
+        trendline_color_override="red",
+    )
+    fig.add_shape(type="line", x0=y_true.min(), y0=y_true.min(), x1=y_true.max(), y1=y_true.max(), line=dict(color="gray", dash="dash"))
+    return fig
+
+def plot_residuals_distribution(y_true: pd.Series, y_pred: np.ndarray) -> go.Figure:
+    """Histogramme de la distribution des résidus."""
+    residuals = y_true - y_pred
+    fig = px.histogram(
+        residuals,
+        title="Distribution des résidus",
+        labels={"value": "Résidus"},
+    )
+    fig.add_vline(x=0, line=dict(color="red", dash="dash"))
+    return fig
+
+def plot_confusion_matrix(y_true: pd.Series, y_pred: np.ndarray, labels: List) -> go.Figure:
+    """Matrice de confusion interactive."""
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    fig = px.imshow(
+        cm,
+        labels=dict(x="Prédit", y="Réel", color="Nombre"),
+        x=labels,
+        y=labels,
+        text_auto=True,
+        color_continuous_scale="Blues",
+        title="Matrice de confusion",
+    )
+    return fig
+
+def plot_roc_curve(y_true: pd.Series, y_proba: np.ndarray, labels: List) -> go.Figure:
+    """Courbe ROC pour la classification binaire ou multi-classe (OvR)."""
+    fig = go.Figure()
+    fig.add_shape(type="line", line=dict(dash="dash"), x0=0, x1=1, y0=0, y1=1)
+
+    if y_proba.shape[1] == 2: # Binaire
+        fpr, tpr, _ = roc_curve(y_true, y_proba[:, 1], pos_label=labels[1])
+        auc = roc_auc_score(y_true, y_proba[:, 1])
+        fig.add_trace(go.Scatter(x=fpr, y=tpr, name=f"Classe '{labels[1]}' (AUC={auc:.3f})", mode="lines"))
+    else: # Multi-classe
+        for i, label in enumerate(labels):
+            fpr, tpr, _ = roc_curve(y_true, y_proba[:, i], pos_label=label)
+            auc = roc_auc_score((y_true == label), y_proba[:, i])
+            fig.add_trace(go.Scatter(x=fpr, y=tpr, name=f"Classe '{label}' (AUC={auc:.3f})", mode="lines"))
+
+    fig.update_layout(
+        xaxis_title="Taux de faux positifs",
+        yaxis_title="Taux de vrais positifs",
+        title="Courbe ROC",
+    )
+    return fig
+
+def plot_feature_importance(pipeline, feature_names: List[str]) -> go.Figure:
+    """Graphique de l'importance des features."""
+    try:
+        importances = pipeline.named_steps["model"].feature_importances_
+    except AttributeError:
+        try:
+            importances = pipeline.named_steps["model"].coef_[0]
+        except AttributeError:
+            return go.Figure().update_layout(title="Importance des features non disponible pour ce modèle")
+
+    feature_importance = pd.DataFrame({"feature": feature_names, "importance": np.abs(importances)}).sort_values("importance", ascending=True)
+    
+    fig = px.bar(
+        feature_importance.tail(20), # Affiche les 20 plus importantes
+        x="importance",
+        y="feature",
+        orientation="h",
+        title="Importance des features",
+    )
+    return fig

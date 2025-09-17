@@ -7,30 +7,30 @@ import pandas as pd
 import streamlit as st
 
 
-SUPPORTED_EXTS = {".csv", ".tsv", ".txt", ".xlsx", ".xls", ".parquet", ".json"}
+SUPPORTED_EXTS = {'.csv', '.tsv', '.txt', '.xlsx', '.xls', '.parquet', '.json'}
 
 
 def _infer_sep(file_name: str) -> str:
 	lower = file_name.lower()
-	if lower.endswith(".tsv"):
-		return "\t"
-	return ","
+	if lower.endswith('.tsv'):
+		return '\t'
+	return ','
 
 
 @st.cache_data(show_spinner=False)
 def load_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
 	"""Load a dataframe from raw bytes using extension-based parsing. Cached by Streamlit."""
 	name = file_name.lower()
-	if name.endswith((".csv", ".tsv", ".txt")):
+	if name.endswith(('.csv', '.tsv', '.txt')):
 		sep = _infer_sep(name)
 		return pd.read_csv(io.BytesIO(file_bytes), sep=sep, low_memory=False)
-	if name.endswith((".xlsx", ".xls")):
+	if name.endswith(('.xlsx', '.xls')):
 		return pd.read_excel(io.BytesIO(file_bytes))
-	if name.endswith(".parquet"):
+	if name.endswith('.parquet'):
 		return pd.read_parquet(io.BytesIO(file_bytes))
-	if name.endswith(".json"):
+	if name.endswith('.json'):
 		return pd.read_json(io.BytesIO(file_bytes), lines=False)
-	raise ValueError("Extension de fichier non supporte. Formats: CSV/TSV/TXT, Excel, Parquet, JSON")
+	raise ValueError('Extension de fichier non supporte. Formats: CSV/TSV/TXT, Excel, Parquet, JSON')
 
 
 def summarize_missing_values(df: pd.DataFrame) -> pd.DataFrame:
@@ -38,15 +38,15 @@ def summarize_missing_values(df: pd.DataFrame) -> pd.DataFrame:
 	missing_count = df.isna().sum()
 	missing_pct = (missing_count / len(df)) * 100 if len(df) else 0
 	return pd.DataFrame({
-		"colonne": missing_count.index,
-		"nb_nan": missing_count.values,
-		"pct_nan": missing_pct.values,
+		'colonne': missing_count.index,
+		'nb_nan': missing_count.values,
+		'pct_nan': missing_pct.values,
 	})
 
 
 def handle_missing_values(
 	df: pd.DataFrame,
-	strategy: str = "aucun",
+	strategy: str = 'aucun',
 	fill_constant: Optional[float] = None,
 	columns: Optional[List[str]] = None,
 ) -> pd.DataFrame:
@@ -64,34 +64,34 @@ def handle_missing_values(
 
 	result = df.copy()
 	subset = [c for c in columns if c in result.columns]
-	if strategy == "aucun":
+	if strategy == 'aucun':
 		return result
-	if strategy == "supprimer_lignes":
+	if strategy == 'supprimer_lignes':
 		return result.dropna(subset=subset)
-	if strategy == "remplir_moyenne":
+	if strategy == 'remplir_moyenne':
 		numeric_cols = [c for c in subset if pd.api.types.is_numeric_dtype(result[c])]
 		for c in numeric_cols:
 			result[c] = result[c].fillna(result[c].mean())
 		return result
-	if strategy == "remplir_mediane":
+	if strategy == 'remplir_mediane':
 		numeric_cols = [c for c in subset if pd.api.types.is_numeric_dtype(result[c])]
 		for c in numeric_cols:
 			result[c] = result[c].fillna(result[c].median())
 		return result
-	if strategy == "remplir_mode":
+	if strategy == 'remplir_mode':
 		for c in subset:
 			mode_vals = result[c].mode(dropna=True)
 			if not mode_vals.empty:
 				result[c] = result[c].fillna(mode_vals.iloc[0])
 		return result
-	if strategy == "remplir_constante":
+	if strategy == 'remplir_constante':
 		if fill_constant is None:
-			raise ValueError("Veuillez fournir une valeur constante pour le remplissage.")
+			raise ValueError('Veuillez fournir une valeur constante pour le remplissage.')
 		for c in subset:
 			result[c] = result[c].fillna(fill_constant)
 		return result
 
-	raise ValueError("Stratégie de gestion des valeurs manquantes inconnue")
+	raise ValueError('Stratégie de gestion des valeurs manquantes inconnue')
 
 
 def auto_detect_variable_types(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
@@ -106,3 +106,24 @@ def auto_detect_variable_types(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
 		else:
 			qualitative_cols.append(col)
 	return qualitative_cols, quantitative_cols
+
+from typing import Tuple, List, Any
+
+def get_task_type(series: pd.Series) -> Tuple[str, List[Any]]:
+    """
+    Détermine si la tâche est une classification ou une régression en fonction de la variable cible.
+    Heuristique : si le nombre de valeurs uniques est faible (< 20 et < 5% du total)
+    et que le type n'est pas float, c'est une classification.
+    """
+    unique_values = series.unique()
+    n_unique = len(unique_values)
+    
+    if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_integer_dtype(series):
+        # Les floats sont presque toujours pour la régression
+        if n_unique > 20:
+             return "regression", []
+
+    if n_unique <= 2 or (n_unique < 20 and n_unique / len(series) < 0.05):
+        return "classification", sorted(list(unique_values))
+    
+    return "regression", []
