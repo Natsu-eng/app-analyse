@@ -1,0 +1,64 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# --- Environnements virtuels ---
+.venv/
+venv/
+ENV/
+.env/
+env/
+.ipynb_checkpoints/
+
+# --- Streamlit cache ---
+.streamlit/
+**/.streamlit/
+.cache/
+**/.cache/
+
+# --- Fichiers temporaires / logs ---
+*.log
+*.tmp
+*.swp
+*.bak
+*.orig
+.DS_Store
+Thumbs.db
+
+# --- Jupyter Notebook ---
+.ipynb_checkpoints
+*.ipynb_checkpoints
+
+# --- VS Code / IDE ---
+.vscode/
+.idea/
+*.code-workspace
+
+# --- Données sensibles ---
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.json
+*.db
+*.sqlite
+*.h5
+
+# --- Tests ---
+.coverage
+htmlcov/
+.tox/
+.nox/
+pytest_cache/
+
+# --- Modèles et Historique ---
+*.joblib
+.history/
