@@ -657,7 +657,7 @@ def detect_imbalance(
 @safe_execute(fallback_value={"target_type": "unknown", "task": "unknown"})
 def get_target_and_task(
     df: Union[pd.DataFrame, dd.DataFrame],
-    target: str
+    target: Optional[str]
 ) -> Dict[str, str]:
     """
     Détecte le type de tâche ML selon la colonne cible.
@@ -665,12 +665,16 @@ def get_target_and_task(
     
     Args:
         df: DataFrame Pandas ou Dask
-        target: Nom de la colonne cible
+        target: Nom de la colonne cible ou None pour non supervisé
     
     Returns:
         Dictionnaire avec le type de cible et la tâche ML
     """
     try:
+        # Cas non supervisé
+        if target is None:
+            return {"target_type": "unsupervised", "task": "unsupervised"}
+
         if target not in df.columns:
             logger.warning(f"Target column '{target}' not found in DataFrame")
             return {"target_type": "unknown", "task": "unknown"}

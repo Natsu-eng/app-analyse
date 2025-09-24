@@ -4,10 +4,11 @@ import logging
 import time
 import psutil
 import gc
-from typing import Dict, List, Any, Optional
 import os
+from typing import Dict, List, Any, Optional
+from functools import wraps
 
-# Imports des modules de l'application
+# Imports des modules ML
 from ml.catalog import MODEL_CATALOG
 from utils.data_analysis import get_target_and_task, detect_imbalance, auto_detect_column_types
 from ml.training import train_models
@@ -17,13 +18,12 @@ from utils.logging_config import get_logger
 logger = get_logger(__name__)
 st.set_page_config(page_title="Configuration ML", page_icon="⚙️", layout="wide")
 
-# --- Configuration Production ---
+# Configuration production
 def setup_ml_config_environment():
     """Configuration pour l'environnement de production ML"""
     if 'ml_config_setup_done' not in st.session_state:
         st.session_state.ml_config_setup_done = True
         
-        # Masquer les éléments Streamlit en production
         if os.getenv('STREAMLIT_ENV') == 'production':
             hide_streamlit_style = """
             <style>
@@ -31,22 +31,40 @@ def setup_ml_config_environment():
             .stDeployButton {display:none;}
             footer {visibility: hidden;}
             #stDecoration {display:none;}
+            .stAlert > div {padding: 0.5rem;}
             </style>
             """
             st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 setup_ml_config_environment()
 
-# --- Vérification initiale des données ---
-@st.cache_data(ttl=300)
+# Décorateur de monitoring
+def monitor_ml_operation(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            if elapsed > 10:
+                logger.warning(f"ML operation {func.__name__} took {elapsed:.2f}s")
+            return result
+        except Exception as e:
+            logger.error(f"ML operation {func.__name__} failed: {e}")
+            raise
+    return wrapper
+
+# Validation sécurisée du DataFrame
+@st.cache_data(ttl=300, max_entries=3)
 def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
-    """Valide le DataFrame pour l'analyse ML"""
+    """Valide le DataFrame pour l'analyse ML avec critères stricts"""
     validation = {
         "is_valid": True,
         "issues": [],
         "warnings": [],
-        "min_rows_required": 50,
-        "min_cols_required": 2
+        "min_rows_required": 50,  # Réduit pour plus de flexibilité
+        "min_cols_required": 2,
+        "stats": {}
     }
     
     try:
@@ -54,42 +72,62 @@ def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
             validation["is_valid"] = False
             validation["issues"].append("DataFrame vide ou non chargé")
             return validation
-            
-        n_rows, n_cols = df.shape
         
-        # Vérification des dimensions minimales
+        n_rows, n_cols = df.shape
+        validation["stats"] = {"n_rows": n_rows, "n_cols": n_cols}
+        
+        # Vérifications dimensionnelles
         if n_rows < validation["min_rows_required"]:
             validation["is_valid"] = False
-            validation["issues"].append(f"Trop peu de lignes ({n_rows} < {validation['min_rows_required']})")
-            
+            validation["issues"].append(f"Insuffisant: {n_rows} lignes (minimum: {validation['min_rows_required']})")
+        
         if n_cols < validation["min_cols_required"]:
             validation["is_valid"] = False
-            validation["issues"].append(f"Trop peu de colonnes ({n_cols} < {validation['min_cols_required']})")
-            
-        # Vérification des valeurs manquantes excessives
-        missing_ratio = df.isnull().mean().max()
-        if missing_ratio > 0.8:
-            validation["warnings"].append(f"Certaines colonnes ont {missing_ratio:.1%} de valeurs manquantes")
-            
-        # Vérification de la mémoire
+            validation["issues"].append(f"Insuffisant: {n_cols} colonnes (minimum: {validation['min_cols_required']})")
+        
+        # Analyse qualité des données
         try:
-            memory_usage = df.memory_usage(deep=True).sum() / (1024**2)  # MB
-            if memory_usage > 500:  # 500MB threshold
-                validation["warnings"].append(f"Dataset volumineux ({memory_usage:.1f} MB)")
-        except:
-            validation["warnings"].append("Impossible de calculer l'utilisation mémoire")
+            missing_ratio = df.isnull().mean().max()
+            if missing_ratio > 0.95:
+                validation["is_valid"] = False
+                validation["issues"].append(f"Trop de valeurs manquantes: {missing_ratio:.1%}")
+            elif missing_ratio > 0.7:
+                validation["warnings"].append(f"Beaucoup de valeurs manquantes: {missing_ratio:.1%}")
             
+            # Vérification variance
+            numeric_cols = df.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                low_variance_cols = []
+                for col in numeric_cols:
+                    if df[col].std() == 0:
+                        low_variance_cols.append(col)
+                
+                if len(low_variance_cols) == len(numeric_cols):
+                    validation["warnings"].append("Toutes les colonnes numériques sont constantes")
+            
+        except Exception as e:
+            validation["warnings"].append(f"Analyse qualité échouée: {str(e)[:50]}")
+        
+        # Vérification mémoire
+        try:
+            memory_usage = df.memory_usage(deep=True).sum() / (1024**2)
+            validation["stats"]["memory_mb"] = memory_usage
+            if memory_usage > 1000:  # 1GB
+                validation["warnings"].append(f"Dataset volumineux: {memory_usage:.1f} MB")
+        except:
+            validation["warnings"].append("Calcul mémoire impossible")
+        
     except Exception as e:
         validation["is_valid"] = False
-        validation["issues"].append(f"Erreur de validation: {str(e)}")
+        validation["issues"].append(f"Erreur validation: {str(e)}")
         logger.error(f"DataFrame validation error: {e}")
-        
+    
     return validation
 
-# --- Initialisation de l'état ML ---
+# Initialisation robuste de l'état ML
 def initialize_ml_config_state():
     """Initialise l'état de configuration ML de façon robuste"""
-    required_keys = {
+    defaults = {
         'target_column_for_ml_config': None,
         'feature_list_for_ml_config': [],
         'preprocessing_choices': {
@@ -97,7 +135,8 @@ def initialize_ml_config_state():
             'categorical_imputation': 'most_frequent',
             'use_smote': False,
             'remove_constant_cols': True,
-            'remove_identifier_cols': True
+            'remove_identifier_cols': True,
+            'scale_features': True
         },
         'selected_models_for_training': [],
         'test_split_for_ml_config': 20,
@@ -105,35 +144,43 @@ def initialize_ml_config_state():
         'task_type': 'classification',
         'ml_training_in_progress': False,
         'ml_last_training_time': None,
-        'ml_error_count': 0
+        'ml_error_count': 0,
+        'ml_session_id': int(time.time()),
+        'current_step': 1
     }
     
-    for key, default_value in required_keys.items():
+    for key, default_value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = default_value
 
+@monitor_ml_operation
 def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
-    """Version sécurisée de la détection du type de tâche avec dictionnaire"""
+    """Version sécurisée de la détection du type de tâche"""
     try:
-        if target_column not in df.columns:
-            return {"task_type": "unknown", "n_classes": 0, "error": "Colonne cible non trouvée"}
-            
-        # get_target_and_task retourne un dictionnaire, pas un tuple
+        if not target_column or target_column not in df.columns:
+            return {"task_type": "unknown", "n_classes": 0, "error": "Colonne cible invalide"}
+        
+        # Appel sécurisé à get_target_and_task
         result_dict = get_target_and_task(df, target_column)
         
-        # Extraction des valeurs du dictionnaire
+        if not isinstance(result_dict, dict):
+            return {"task_type": "unknown", "n_classes": 0, "error": "Résultat invalide"}
+        
         task_type = result_dict.get("task", "unknown")
         target_type = result_dict.get("target_type", "unknown")
         
-        # Calcul du nombre de classes si classification
+        # Calcul sécurisé du nombre de classes
         n_classes = 0
-        if task_type == "classification" and target_column in df.columns:
-            n_classes = df[target_column].nunique()
-            
+        try:
+            if task_type == "classification":
+                n_classes = df[target_column].nunique()
+        except Exception as e:
+            logger.debug(f"Class count calculation failed: {e}")
+        
         return {
-            "task_type": task_type, 
+            "task_type": task_type,
             "target_type": target_type,
-            "n_classes": n_classes, 
+            "n_classes": n_classes,
             "error": None
         }
         
@@ -141,428 +188,893 @@ def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
         logger.error(f"Task type detection failed: {e}")
         return {"task_type": "unknown", "n_classes": 0, "error": str(e)}
 
-# --- Interface Principale ---
+def get_task_specific_models(task_type: str) -> List[str]:
+    """Retourne les modèles disponibles pour un type de tâche spécifique"""
+    try:
+        if task_type == 'unsupervised':
+            return list(MODEL_CATALOG.get('unsupervised', {}).keys())
+        elif task_type == 'regression':
+            return list(MODEL_CATALOG.get('regression', {}).keys())
+        else:  # classification par défaut
+            return list(MODEL_CATALOG.get('classification', {}).keys())
+    except Exception as e:
+        logger.error(f"Error getting models for {task_type}: {e}")
+        return []
+
+def get_default_models_for_task(task_type: str) -> List[str]:
+    """Retourne les modèles par défaut pour chaque type de tâche"""
+    default_models = {
+        'classification': ['RandomForest', 'XGBoost', 'LogisticRegression'],
+        'regression': ['RandomForest', 'XGBoost', 'LinearRegression'],
+        'unsupervised': ['KMeans', 'DBSCAN', 'GaussianMixture']
+    }
+    available_models = get_task_specific_models(task_type)
+    return [model for model in default_models.get(task_type, []) if model in available_models]
+
+# Interface principale
 st.title("⚙️ Configuration Détaillée de l'Expérience ML")
 
-# Vérification initiale des données
+# Vérification des données avec validation stricte
 if 'df' not in st.session_state or st.session_state.df is None:
-    st.error("📊 Veuillez d'abord charger un jeu de données depuis la page d'Accueil.")
-    st.page_link("app.py", label="📋 Retour à l'accueil", icon="🏠")
+    st.error("📊 Aucun dataset chargé")
+    st.info("Chargez d'abord un dataset depuis la page d'accueil pour configurer l'expérience ML.")
+    if st.button("🏠 Retour à l'accueil"):
+        st.switch_page("app.py")
     st.stop()
 
 df = st.session_state.df
 
-# Validation du DataFrame
+# Validation stricte du DataFrame
 validation_result = validate_dataframe_for_ml(df)
 if not validation_result["is_valid"]:
-    st.error("❌ Dataset incompatible avec l'analyse ML")
-    for issue in validation_result["issues"]:
-        st.write(f"• {issue}")
+    st.error("❌ Dataset non compatible avec l'analyse ML")
+    with st.expander("🔍 Détails des problèmes", expanded=True):
+        for issue in validation_result["issues"]:
+            st.error(f"• {issue}")
+    
+    st.info("""
+    **Critères requis pour l'analyse ML:**
+    - Minimum 50 lignes de données
+    - Minimum 2 colonnes
+    - Moins de 95% de valeurs manquantes par colonne
+    """)
+    
+    if st.button("🔄 Revérifier"):
+        st.rerun()
     st.stop()
 
-# Affichage des avertissements
+# Avertissements non-bloquants
 if validation_result["warnings"]:
-    with st.expander("⚠️ Avertissements", expanded=False):
+    with st.expander("⚠️ Avertissements qualité données", expanded=False):
         for warning in validation_result["warnings"]:
-            st.warning(warning)
+            st.warning(f"• {warning}")
 
 # Initialisation de l'état
 initialize_ml_config_state()
 
-# Métriques du dataset
-col1, col2, col3, col4 = st.columns(4)
+# Métriques du dataset avec design amélioré
+st.markdown("### 📊 Aperçu du Dataset")
+col1, col2, col3, col4, col5 = st.columns(5)
+
 with col1:
-    st.metric("Lignes", f"{len(df):,}")
+    n_rows = validation_result["stats"]["n_rows"]
+    st.metric("📏 Lignes", f"{n_rows:,}")
+
 with col2:
-    st.metric("Colonnes", f"{len(df.columns)}")
+    n_cols = validation_result["stats"]["n_cols"]
+    st.metric("📋 Colonnes", f"{n_cols}")
+
 with col3:
-    try:
-        memory_mb = df.memory_usage(deep=True).sum() / (1024**2)
-        st.metric("Mémoire", f"{memory_mb:.1f} MB")
-    except:
-        st.metric("Mémoire", "N/A")
+    memory_mb = validation_result["stats"].get("memory_mb", 0)
+    if memory_mb > 0:
+        st.metric("💾 Mémoire", f"{memory_mb:.1f} MB")
+    else:
+        st.metric("💾 Mémoire", "N/A")
+
 with col4:
-    st.metric("Type", "Pandas")
+    missing_pct = df.isnull().mean().mean() * 100
+    st.metric("🕳️ Manquant", f"{missing_pct:.1f}%")
+
+with col5:
+    try:
+        sys_memory = psutil.virtual_memory().percent
+        color = "🔴" if sys_memory > 85 else "🟡" if sys_memory > 70 else "🟢"
+        st.metric(f"{color} RAM Sys", f"{sys_memory:.0f}%")
+    except:
+        st.metric("🔧 RAM Sys", "N/A")
 
 st.markdown("---")
 
-# --- Définition des onglets ---
-tab_target, tab_preprocess, tab_models, tab_launch = st.tabs([
-    "🎯 1. Cible & Features", 
-    "🔧 2. Prétraitement", 
-    "🤖 3. Sélection des Modèles", 
-    "🚀 4. Lancement"
-])
+# Navigation par étapes avec état persistant
+steps = ["🎯 Cible", "🔧 Préprocess", "🤖 Modèles", "🚀 Lancement"]
+selected_step = st.radio("Étapes de configuration", steps, index=st.session_state.current_step - 1, horizontal=True)
+st.session_state.current_step = steps.index(selected_step) + 1
 
-# --- Onglet 1: Cible & Features ---
-with tab_target:
-    st.header("🎯 Définition de la Cible et des Variables Explicatives")
+# Étape 1: Configuration de la cible
+if st.session_state.current_step == 1:
+    st.header("🎯 Configuration de la Tâche et Cible")
     
-    col1, col2 = st.columns([1, 1])
+    # Sélection du type de tâche avec état stable
+    task_options = ["Classification Supervisée", "Régression Supervisée", "Clustering Non Supervisé"]
+    task_descriptions = {
+        "Classification Supervisée": "Prédire des catégories (ex: spam/non-spam)",
+        "Régression Supervisée": "Prédire des valeurs numériques (ex: prix, score)", 
+        "Clustering Non Supervisé": "Découvrir des groupes naturels dans les données"
+    }
     
-    with col1:
-        st.subheader("Variable Cible (Y)")
-        target_column = st.selectbox(
-            "Sélectionnez la variable à prédire", 
-            options=df.columns,
-            key="config_target_select",
-            help="Cette variable sera utilisée comme cible pour l'apprentissage"
-        )
+    # Déterminer l'index initial basé sur l'état actuel
+    if st.session_state.task_type == 'unsupervised':
+        current_task_idx = 2
+    elif st.session_state.task_type == 'regression':
+        current_task_idx = 1
+    else:
+        current_task_idx = 0
+    
+    task_selection = st.selectbox(
+        "Type de problème ML à résoudre",
+        options=task_options,
+        index=current_task_idx,
+        key="ml_task_selection_stable",
+        help="Sélectionnez le type d'apprentissage adapté à vos données"
+    )
+    
+    # Afficher la description
+    st.info(f"**{task_selection}** - {task_descriptions[task_selection]}")
+    
+    # Mapper la sélection au type de tâche
+    task_mapping = {
+        "Classification Supervisée": "classification",
+        "Régression Supervisée": "regression", 
+        "Clustering Non Supervisé": "unsupervised"
+    }
+    
+    selected_task_type = task_mapping[task_selection]
+    st.session_state.task_type = selected_task_type
+    
+    # Configuration spécifique selon le type de tâche
+    if selected_task_type in ['classification', 'regression']:
+        st.subheader("🎯 Variable Cible (Y)")
         
-        if target_column:
-            task_info = safe_get_task_type(df, target_column)
-            
-            if task_info["error"]:
-                st.error(f"Erreur de détection: {task_info['error']}")
+        # Sélecteur de cible adapté au type de tâche
+        if selected_task_type == 'classification':
+            # Pour classification: privilégier les colonnes catégorielles ou avec peu de valeurs uniques
+            available_targets = [col for col in df.columns if df[col].nunique() <= 50 or not pd.api.types.is_numeric_dtype(df[col])]
+        else:  # regression
+            # Pour régression: privilégier les colonnes numériques continues
+            available_targets = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col]) and df[col].nunique() > 10]
+        
+        if not available_targets:
+            st.error("❌ Aucune variable cible appropriée trouvée")
+            if selected_task_type == 'classification':
+                st.info("Pour la classification, la variable cible doit avoir un nombre limité de valeurs uniques (≤50)")
             else:
-                # Affichage stylisé du type de tâche
-                task_type = task_info["task_type"]
-                n_classes = task_info["n_classes"]
-                
-                if task_type == "classification":
-                    st.success(f"**Tâche détectée : CLASSIFICATION**")
-                    st.info(f"Nombre de classes : {n_classes}")
-                    
-                    # Détection du déséquilibre
-                    imbalance_result = detect_imbalance(df, target_column)
-                    if imbalance_result.get("is_imbalanced", False):
-                        st.warning("⚖️ **Déséquilibre détecté** - Pensez à activer SMOTE dans l'onglet Prétraitement")
-                    
-                elif task_type == "regression":
-                    st.success(f"**Tâche détectée : RÉGRESSION**")
-                    # Statistiques de la variable cible
-                    target_stats = df[target_column].describe()
-                    st.write(f"**Plage de valeurs :** {target_stats['min']:.2f} à {target_stats['max']:.2f}")
-                    
-                elif task_type == "unsupervised":
-                    st.info("**Tâche détectée : NON SUPERVISÉ**")
-                    st.caption("Clustering ou réduction de dimension")
-                
-                st.session_state.task_type = task_type
-                st.session_state.target_column_for_ml_config = target_column
-    
-    with col2:
-        if st.session_state.target_column_for_ml_config:
-            st.subheader("Variables Explicatives (X)")
+                st.info("Pour la régression, la variable cible doit être numérique avec plusieurs valeurs uniques")
+        else:
+            # Ajouter option "Aucune" en premier
+            available_targets = [None] + available_targets
             
-            all_features = [col for col in df.columns if col != st.session_state.target_column_for_ml_config]
+            if not st.session_state.target_column_for_ml_config or st.session_state.target_column_for_ml_config not in available_targets:
+                target_idx = 0
+            else:
+                try:
+                    target_idx = available_targets.index(st.session_state.target_column_for_ml_config)
+                except ValueError:
+                    target_idx = 0
             
-            # Détection automatique des types de colonnes pour le guide
-            with st.spinner("Analyse des variables..."):
-                column_types = auto_detect_column_types(df[all_features])
-            
-            # Interface de sélection avec informations
-            selected_features = st.multiselect(
-                "Sélectionnez les variables d'entrée",
-                options=all_features,
-                default=all_features,
-                key="config_features_select",
-                help="Variables utilisées pour prédire la cible"
+            target_column = st.selectbox(
+                "Sélectionnez la variable à prédire",
+                options=available_targets,
+                index=target_idx,
+                key="ml_target_selector_stable",
+                help="Variable que le modèle apprendra à prédire"
             )
             
-            st.session_state.feature_list_for_ml_config = selected_features
+            # Mise à jour de l'état cible
+            if target_column != st.session_state.target_column_for_ml_config:
+                st.session_state.target_column_for_ml_config = target_column
+                # Reset features si changement de cible
+                st.session_state.feature_list_for_ml_config = []
             
-            # Statistiques des features sélectionnées
-            if selected_features:
-                st.success(f"✅ {len(selected_features)} variables sélectionnées")
+            if target_column:
+                # Analyse de la cible avec feedback utilisateur
+                with st.spinner("🔍 Analyse de la variable cible..."):
+                    task_info = safe_get_task_type(df, target_column)
                 
-                # Répartition par type
-                numeric_count = len([f for f in selected_features if f in column_types.get('numeric', [])])
-                categorical_count = len([f for f in selected_features if f in column_types.get('categorical', [])])
-                other_count = len(selected_features) - numeric_count - categorical_count
-                
-                st.caption(f"📊 {numeric_count} numériques • {categorical_count} catégorielles • {other_count} autres")
+                if task_info["error"]:
+                    st.error(f"❌ Erreur analyse cible: {task_info['error']}")
+                else:
+                    # Affichage des informations sur la tâche
+                    if selected_task_type == "classification":
+                        st.success(f"✅ **Tâche: CLASSIFICATION** ({task_info['n_classes']} classes détectées)")
+                        
+                        # Affichage distribution des classes
+                        class_dist = df[target_column].value_counts()
+                        if len(class_dist) <= 10:
+                            st.bar_chart(class_dist)
+                            st.caption(f"Distribution des {len(class_dist)} classes")
+                        
+                        # Vérification déséquilibre
+                        try:
+                            imbalance_info = detect_imbalance(df, target_column)
+                            if imbalance_info and imbalance_info.get("is_imbalanced"):
+                                st.warning(f"⚠️ **Déséquilibre détecté** (ratio: {imbalance_info.get('imbalance_ratio', 'N/A'):.2f})")
+                                st.info("💡 **Conseil**: Activez SMOTE dans l'étape de prétraitement pour améliorer les performances")
+                        except Exception as e:
+                            logger.debug(f"Imbalance detection failed: {e}")
+                            
+                    elif selected_task_type == "regression":
+                        st.success("✅ **Tâche: RÉGRESSION**")
+                        
+                        # Statistiques de la variable cible
+                        target_stats = df[target_column].describe()
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Moyenne", f"{target_stats['mean']:.3f}")
+                        with col2:
+                            st.metric("Médiane", f"{target_stats['50%']:.3f}")
+                        with col3:
+                            st.metric("Écart-type", f"{target_stats['std']:.3f}")
+                        with col4:
+                            st.metric("Plage", f"{target_stats['max'] - target_stats['min']:.3f}")
+        
+        # Sélection des features avec validation
+        st.subheader("📊 Variables Explicatives (X)")
+        all_features = [col for col in df.columns if col != target_column] if target_column else list(df.columns)
+        
+        if all_features:
+            # Features recommandées vs toutes
+            recommend_features = st.checkbox(
+                "Sélection automatique des features pertinentes", 
+                value=len(st.session_state.feature_list_for_ml_config) == 0,
+                help="Sélectionne automatiquement les variables les plus prometteuses"
+            )
+            
+            if recommend_features and target_column:
+                with st.spinner("🤖 Analyse des features..."):
+                    try:
+                        # Sélection intelligente basée sur les types
+                        column_types = auto_detect_column_types(df)
+                        recommended_features = []
+                        
+                        # Ajouter colonnes numériques (généralement bonnes pour ML)
+                        recommended_features.extend(
+                            col for col in column_types.get('numeric', []) 
+                            if col != target_column and col in all_features
+                        )
+                        
+                        # Ajouter quelques catégorielles avec peu de modalités
+                        categorical_features = [
+                            col for col in column_types.get('categorical', [])
+                            if col != target_column and col in all_features and df[col].nunique() <= 20
+                        ]
+                        recommended_features.extend(categorical_features[:8])  # Limite à 8
+                        
+                        if recommended_features:
+                            st.session_state.feature_list_for_ml_config = recommended_features[:25]  # Limite globale
+                            st.success(f"✅ {len(st.session_state.feature_list_for_ml_config)} features sélectionnées automatiquement")
+                        else:
+                            st.session_state.feature_list_for_ml_config = all_features[:15]
+                            st.info("ℹ️ Sélection par défaut appliquée")
+                    except Exception as e:
+                        logger.error(f"Auto feature selection failed: {e}")
+                        st.session_state.feature_list_for_ml_config = all_features[:15]
             else:
-                st.error("❌ Aucune variable sélectionnée")
-
-# --- Onglet 2: Prétraitement ---
-with tab_preprocess:
-    st.header("🔧 Options de Prétraitement des Données")
+                # Sélection manuelle
+                selected_features = st.multiselect(
+                    "Variables d'entrée pour la prédiction",
+                    options=all_features,
+                    default=st.session_state.feature_list_for_ml_config if st.session_state.feature_list_for_ml_config else [],
+                    key="ml_features_selector_stable",
+                    help="Variables utilisées pour prédire la cible"
+                )
+                st.session_state.feature_list_for_ml_config = selected_features
+            
+            # Affichage des features sélectionnées
+            if st.session_state.feature_list_for_ml_config:
+                st.success(f"✅ {len(st.session_state.feature_list_for_ml_config)} features sélectionnées")
+                if len(st.session_state.feature_list_for_ml_config) > 12:
+                    features_display = st.session_state.feature_list_for_ml_config[:10]
+                    st.caption(f"📋 {', '.join(features_display)} ... +{len(st.session_state.feature_list_for_ml_config)-10} autres")
+                else:
+                    st.caption(f"📋 {', '.join(st.session_state.feature_list_for_ml_config)}")
+                
+                # Avertissement si trop de features
+                if len(st.session_state.feature_list_for_ml_config) > 30:
+                    st.warning("⚠️ Nombre élevé de features - risque de surapprentissage")
+            else:
+                st.warning("⚠️ Aucune feature sélectionnée")
+        else:
+            st.error("❌ Aucune feature disponible")
     
-    st.info("""
-    ⚠️ **Important** : Ces traitements sont appliqués à l'intérieur de la validation croisée 
-    pour éviter les fuites de données (data leakage). Chaque fold est traité indépendamment.
+    else:  # Non supervisé (Clustering)
+        st.session_state.target_column_for_ml_config = None
+        st.success("✅ **Tâche: CLUSTERING NON SUPERVISÉ**")
+        st.info("🔍 Le modèle identifiera automatiquement des groupes naturels dans les données sans variable cible")
+        
+        # Sélection features pour clustering - uniquement numériques
+        all_numeric_features = df.select_dtypes(include=['number']).columns.tolist()
+        
+        if not all_numeric_features:
+            st.error("❌ Aucune variable numérique disponible pour le clustering")
+            st.info("Le clustering nécessite des variables numériques. Vérifiez les types de données de votre dataset.")
+        else:
+            st.subheader("📊 Variables pour le Clustering")
+            st.info("💡 **Conseil**: Sélectionnez des variables numériques représentatives pour obtenir de bons clusters")
+            
+            # Sélection automatique pour clustering
+            auto_cluster_features = st.checkbox(
+                "Sélection automatique des variables numériques",
+                value=len(st.session_state.feature_list_for_ml_config) == 0,
+                help="Sélectionne toutes les variables numériques adaptées au clustering"
+            )
+            
+            if auto_cluster_features:
+                st.session_state.feature_list_for_ml_config = all_numeric_features[:20]  # Limite raisonnable
+                st.success(f"✅ {len(st.session_state.feature_list_for_ml_config)} variables numériques sélectionnées")
+            else:
+                # Sélection manuelle
+                clustering_features = st.multiselect(
+                    "Variables pour l'analyse de clusters",
+                    options=all_numeric_features,
+                    default=st.session_state.feature_list_for_ml_config if st.session_state.feature_list_for_ml_config else all_numeric_features[:10],
+                    key="clustering_features_selector",
+                    help="Variables numériques utilisées pour identifier les patterns et clusters"
+                )
+                st.session_state.feature_list_for_ml_config = clustering_features
+            
+            if st.session_state.feature_list_for_ml_config:
+                st.success(f"✅ {len(st.session_state.feature_list_for_ml_config)} variables sélectionnées pour le clustering")
+                
+                # Vérification de la qualité des features pour clustering
+                if len(st.session_state.feature_list_for_ml_config) < 2:
+                    st.warning("⚠️ Au moins 2 variables sont recommandées pour un clustering significatif")
+                elif len(st.session_state.feature_list_for_ml_config) > 15:
+                    st.warning("⚠️ Nombre élevé de variables - risque de 'malédiction de la dimensionnalité'")
+                
+                # Aperçu statistique
+                with st.expander("📈 Aperçu des variables sélectionnées", expanded=False):
+                    cluster_stats = df[st.session_state.feature_list_for_ml_config].describe()
+                    st.dataframe(cluster_stats.style.format("{:.3f}"), use_container_width=True)
+            else:
+                st.warning("⚠️ Aucune variable sélectionnée pour le clustering")
+
+# Étape 2: Prétraitement
+elif st.session_state.current_step == 2:
+    st.header("🔧 Configuration du Prétraitement")
+    
+    task_type = st.session_state.get('task_type', 'classification')
+    
+    st.info(f"""
+    ℹ️ **Pipeline de prétraitement pour {task_type.upper()}**: 
+    Les transformations sont appliquées dans l'ordre suivant, séparément sur train/validation pour éviter le data leakage.
     """)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("🧩 Gestion des valeurs manquantes")
+        st.subheader("🧩 Gestion des Valeurs Manquantes")
         
+        # Stratégies avec explications adaptées au type de tâche
         st.session_state.preprocessing_choices['numeric_imputation'] = st.selectbox(
-            "Stratégie pour les variables numériques",
+            "Variables numériques",
             options=['mean', 'median', 'constant', 'knn'],
-            index=0,
-            key='cfg_num_strat',
-            help="Moyenne, Médiane, Valeur constante (0), ou K-plus proches voisins"
+            index=['mean', 'median', 'constant', 'knn'].index(
+                st.session_state.preprocessing_choices.get('numeric_imputation', 'mean')
+            ),
+            key='numeric_imputation_selector',
+            help="mean=moyenne (robuste), median=médiane (extrêmes), constant=0, knn=k-voisins (précis)"
         )
         
         st.session_state.preprocessing_choices['categorical_imputation'] = st.selectbox(
-            "Stratégie pour les variables catégorielles",
+            "Variables catégorielles",
             options=['most_frequent', 'constant'],
-            index=0,
-            key='cfg_cat_strat',
-            help="Valeur la plus fréquente ou valeur constante ('missing')"
+            index=['most_frequent', 'constant'].index(
+                st.session_state.preprocessing_choices.get('categorical_imputation', 'most_frequent')
+            ),
+            key='categorical_imputation_selector',
+            help="most_frequent=mode (fréquent), constant='missing' (explicite)"
         )
         
+        st.subheader("🧹 Nettoyage Automatique")
+        
         st.session_state.preprocessing_choices['remove_constant_cols'] = st.checkbox(
-            "Supprimer les colonnes constantes",
-            value=True,
-            key="cfg_remove_constant",
-            help="Élimine les colonnes sans variance"
+            "Supprimer colonnes constantes",
+            value=st.session_state.preprocessing_choices.get('remove_constant_cols', True),
+            key="remove_constant_checkbox",
+            help="Élimine variables sans variance (utile pour tous les types)"
         )
         
         st.session_state.preprocessing_choices['remove_identifier_cols'] = st.checkbox(
-            "Supprimer les colonnes de type ID",
-            value=True,
-            key="cfg_remove_id",
-            help="Élimine les colonnes avec des valeurs uniques pour chaque ligne"
+            "Supprimer colonnes identifiantes",
+            value=st.session_state.preprocessing_choices.get('remove_identifier_cols', True),
+            key="remove_id_checkbox",
+            help="Élimine variables avec valeurs uniques (ID, etc.)"
         )
     
     with col2:
-        st.subheader("⚖️ Équilibrage des données")
+        st.subheader("📏 Normalisation et Mise à l'échelle")
         
-        # Afficher SMOTE seulement pour la classification
-        if st.session_state.get('task_type') == 'classification':
-            imbalance_info = detect_imbalance(df, st.session_state.target_column_for_ml_config)
+        scale_help = {
+            'classification': "Recommandé pour SVM, KNN, réseaux de neurones",
+            'regression': "Recommandé pour la plupart des algorithmes", 
+            'unsupervised': "ESSENTIEL pour le clustering (KMeans, DBSCAN)"
+        }
+        
+        st.session_state.preprocessing_choices['scale_features'] = st.checkbox(
+            "Normaliser les features",
+            value=st.session_state.preprocessing_choices.get('scale_features', True),
+            key="scale_features_checkbox",
+            help=scale_help.get(task_type, "Recommandé pour la plupart des algorithmes")
+        )
+        
+        if task_type == 'unsupervised' and not st.session_state.preprocessing_choices.get('scale_features', True):
+            st.error("❌ **ATTENTION**: La normalisation est CRITIQUE pour le clustering!")
+            st.info("Les algorithmes comme KMeans sont sensibles à l'échelle des variables")
+        
+        # Options spécifiques au type de tâche
+        if task_type == 'classification':
+            st.subheader("⚖️ Gestion du Déséquilibre")
             
-            if imbalance_info.get("is_imbalanced", False):
-                st.warning("📉 **Déséquilibre détecté**")
-                st.write(f"Ratio de déséquilibre : {imbalance_info.get('imbalance_ratio', 'N/A'):.2f}")
-                
-                st.session_state.preprocessing_choices['use_smote'] = st.checkbox(
-                    "Activer SMOTE (Synthetic Minority Over-sampling Technique)",
-                    value=True,
-                    key="cfg_smote",
-                    help="Génère des échantillons synthétiques pour les classes minoritaires"
-                )
-                
-                if st.session_state.preprocessing_choices['use_smote']:
-                    st.success("✅ SMOTE sera appliqué pendant l'entraînement")
+            if st.session_state.target_column_for_ml_config:
+                try:
+                    with st.spinner("Analyse du déséquilibre..."):
+                        imbalance_info = detect_imbalance(df, st.session_state.target_column_for_ml_config)
+                    
+                    if imbalance_info and imbalance_info.get("is_imbalanced", False):
+                        st.warning("📉 **Déséquilibre de classes détecté**")
+                        ratio = imbalance_info.get('imbalance_ratio', 0)
+                        majority_class = imbalance_info.get('majority_class', '')
+                        minority_class = imbalance_info.get('minority_class', '')
+                        
+                        st.write(f"**Ratio**: {ratio:.2f}")
+                        st.write(f"**Classe majoritaire**: {majority_class}")
+                        st.write(f"**Classe minoritaire**: {minority_class}")
+                        
+                        st.session_state.preprocessing_choices['use_smote'] = st.checkbox(
+                            "Activer SMOTE (Sur-échantillonnage)",
+                            value=st.session_state.preprocessing_choices.get('use_smote', True),
+                            key="smote_checkbox",
+                            help="Génère des échantillons synthétiques pour équilibrer les classes minoritaires"
+                        )
+                        
+                        if st.session_state.preprocessing_choices['use_smote']:
+                            st.success("✅ SMOTE activé - améliorera les performances sur les classes minoritaires")
+                    else:
+                        st.success("✅ Classes équilibrées")
+                        st.session_state.preprocessing_choices['use_smote'] = False
+                        st.session_state.preprocessing_choices['use_smote'] = st.checkbox(
+                            "Activer SMOTE (optionnel)",
+                            value=False,
+                            key="smote_optional_checkbox",
+                            help="Peut être activé même si les classes sont équilibrées"
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"Imbalance detection error: {e}")
+                    st.warning("⚠️ Impossible d'analyser le déséquilibre")
+                    st.session_state.preprocessing_choices['use_smote'] = False
             else:
-                st.success("✅ Les classes sont équilibrées")
-                st.session_state.preprocessing_choices['use_smote'] = False
-        else:
-            st.info("🔒 L'équilibrage SMOTE n'est disponible que pour la classification")
-            st.session_state.preprocessing_choices['use_smote'] = False
+                st.info("🔒 Variable cible requise pour l'analyse de déséquilibre")
+        
+        elif task_type == 'unsupervised':
+            st.subheader("🔍 Options de Clustering")
+            
+            st.info("""
+            **Recommandations pour le clustering:**
+            - ✅ Normalisation CRITIQUE
+            - ✅ Suppression des variables constantes
+            - ✅ Gestion des valeurs manquantes
+            """)
+            
+            # Option spécifique au clustering
+            st.session_state.preprocessing_choices['pca_preprocessing'] = st.checkbox(
+                "Réduction de dimension (PCA optionnel)",
+                value=st.session_state.preprocessing_choices.get('pca_preprocessing', False),
+                help="Réduit le bruit et amliore les performances sur données haute dimension"
+            )
 
-# --- Onglet 3: Sélection des Modèles ---
-with tab_models:
+# Étape 3: Sélection des modèles
+elif st.session_state.current_step == 3:
     st.header("🤖 Sélection et Configuration des Modèles")
     
     task_type = st.session_state.get('task_type', 'classification')
-    available_models = list(MODEL_CATALOG.get(task_type, {}).keys())
+    available_models = get_task_specific_models(task_type)
     
     if not available_models:
-        st.error(f"❌ Aucun modèle disponible pour la tâche '{task_type}'")
+        st.error(f"❌ Aucun modèle disponible pour '{task_type}'")
+        st.info("Vérifiez la configuration du catalogue de modèles")
         st.stop()
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("Modèles disponibles")
+        st.subheader("🎯 Modèles Disponibles")
+        
+        # Pré-sélection intelligente basée sur le type de tâche
+        if not st.session_state.selected_models_for_training:
+            default_models = get_default_models_for_task(task_type)
+            st.session_state.selected_models_for_training = default_models
         
         selected_models = st.multiselect(
-            "Sélectionnez les modèles à entraîner et comparer",
+            f"Modèles {task_type} à entraîner et comparer",
             options=available_models,
-            default=available_models[:2] if len(available_models) >= 2 else available_models,
-            key="cfg_model_select",
-            help="Les modèles seront entraînés et comparés automatiquement"
+            default=st.session_state.selected_models_for_training,
+            key="models_multiselect_stable",
+            help="Chaque modèle sera entraîné et évalué automatiquement"
         )
         
         st.session_state.selected_models_for_training = selected_models
         
-        # Informations sur les modèles sélectionnés
+        # Informations détaillées sur les modèles
         if selected_models:
             st.success(f"✅ {len(selected_models)} modèles sélectionnés")
             
-            # Afficher les détails des modèles
             with st.expander("📋 Détails des modèles sélectionnés", expanded=False):
                 for model_name in selected_models:
-                    model_config = MODEL_CATALOG[task_type][model_name]
-                    st.write(f"**{model_name}**")
-                    st.caption(f"Type: {type(model_config['model']).__name__}")
-                    if model_config.get('params'):
-                        st.caption(f"Hyperparamètres à optimiser: {len(model_config['params'])}")
+                    try:
+                        model_config = MODEL_CATALOG[task_type][model_name]
+                        st.write(f"**{model_name}**")
+                        
+                        if 'description' in model_config:
+                            st.caption(f"• {model_config['description']}")
+                        
+                        st.caption(f"• Type: {type(model_config['model']).__name__}")
+                        
+                        if model_config.get('params'):
+                            param_count = len(model_config['params'])
+                            st.caption(f"• Hyperparamètres: {param_count} disponibles")
+                            
+                        # Conseils spécifiques
+                        if task_type == 'unsupervised':
+                            if model_name == 'KMeans':
+                                st.caption("💡 **Conseil**: Excellent pour clusters sphériques de taille similaire")
+                            elif model_name == 'DBSCAN':
+                                st.caption("💡 **Conseil**: Robustes au bruit, trouve clusters de forme arbitraire")
+                            elif model_name == 'GaussianMixture':
+                                st.caption("💡 **Conseil**: Modèle probabiliste, bon pour clusters de taille variable")
+                            
+                    except Exception as e:
+                        logger.error(f"Model info error for {model_name}: {e}")
+                        st.caption(f"• {model_name}: Informations non disponibles")
+        else:
+            st.warning("⚠️ Aucun modèle sélectionné")
     
     with col2:
-        st.subheader("⚙️ Configuration")
+        st.subheader("⚙️ Configuration Avancée")
         
-        st.session_state.test_split_for_ml_config = st.slider(
-            "Taille du jeu de test (%)", 
-            min_value=10, 
-            max_value=40, 
-            value=20, 
-            step=5,
-            key="cfg_test_size",
-            help="Pourcentage des données réservé pour le test"
+        # Configuration différente selon le type de tâche
+        if task_type != 'unsupervised':
+            # Taille du jeu de test avec validation - UNIQUEMENT pour supervisé
+            test_split = st.slider(
+                "Jeu de test (%)",
+                min_value=10,
+                max_value=40,
+                value=st.session_state.get('test_split_for_ml_config', 20),
+                step=5,
+                key="test_split_slider_stable",
+                help="Pourcentage de données réservées pour l'évaluation finale"
+            )
+            st.session_state.test_split_for_ml_config = test_split
+            st.caption(f"📊 {test_split}% pour test, {100-test_split}% pour entraînement")
+        else:
+            # Pour non supervisé, pas de split
+            st.info("🔍 **Clustering**: Utilisation de 100% des données")
+            st.session_state.test_split_for_ml_config = 0
+            st.caption("Le clustering utilise tout le dataset pour trouver des patterns")
+        
+        # Optimisation des hyperparamètres
+        optimize_hp = st.checkbox(
+            "Optimisation hyperparamètres",
+            value=st.session_state.get('optimize_hp_for_ml_config', False),
+            key="optimize_hp_checkbox_stable",
+            help="Recherche automatique des meilleurs paramètres (plus long mais meilleures performances)"
         )
+        st.session_state.optimize_hp_for_ml_config = optimize_hp
         
-        st.session_state.optimize_hp_for_ml_config = st.checkbox(
-            "Optimisation des hyperparamètres", 
-            value=False,
-            key="cfg_optimize",
-            help="Recherche systématique des meilleurs paramètres (plus long)"
-        )
+        if optimize_hp:
+            st.warning("⏰ Temps d'entraînement multiplié par 3-5x")
+            
+            # Options d'optimisation adaptées
+            if task_type == 'unsupervised':
+                optimization_method = st.selectbox(
+                    "Méthode d'optimisation",
+                    options=['Silhouette Score', 'Davies-Bouldin'],
+                    index=0,
+                    key="optimization_method_selector",
+                    help="Silhouette=qualité clusters, Davies-Bouldin=compacité"
+                )
+            else:
+                optimization_method = st.selectbox(
+                    "Méthode d'optimisation",
+                    options=['GridSearch', 'RandomSearch'],
+                    index=0,
+                    key="optimization_method_selector",
+                    help="GridSearch=exhaustif (précis), RandomSearch=échantillonnage (rapide)"
+                )
+            st.session_state.optimization_method = optimization_method
         
-        if st.session_state.optimize_hp_for_ml_config:
-            st.warning("⏰ L'optimisation peut multiplier le temps d'entraînement")
+        # Estimation du temps adaptée au type de tâche
+        n_models = len(selected_models)
+        base_time = max(1, int(len(df) / 500))  # Estimation plus réaliste
+        
+        if task_type == 'unsupervised':
+            time_multiplier = 2  # Clustering généralement plus rapide
+        else:
+            time_multiplier = 3 if optimize_hp else 1
+        
+        estimated_time = base_time * n_models * time_multiplier
+        
+        st.info(f"⏱️ Temps estimé: {estimated_time} minute(s)")
+        
+        # Avertissements spécifiques
+        if task_type == 'unsupervised' and len(selected_models) > 3:
+            st.warning("⚠️ Le clustering peut être long avec beaucoup de données")
 
-# --- Onglet 4: Lancement ---
-with tab_launch:
+# Étape 4: Lancement
+elif st.session_state.current_step == 4:
     st.header("🚀 Lancement de l'Expérimentation")
     
-    # Vérification de la configuration
-    config_errors = []
+    task_type = st.session_state.get('task_type', 'classification')
     
-    if not st.session_state.target_column_for_ml_config:
-        config_errors.append("Variable cible non définie")
+    # Validation complète de la configuration
+    config_issues = []
+    config_warnings = []
+    
+    # Vérifications obligatoires
+    if task_type in ['classification', 'regression'] and not st.session_state.target_column_for_ml_config:
+        config_issues.append("Variable cible non définie")
     
     if not st.session_state.feature_list_for_ml_config:
-        config_errors.append("Aucune variable explicative sélectionnée")
+        config_issues.append("Aucune variable explicative sélectionnée")
+    elif len(st.session_state.feature_list_for_ml_config) < 2 and task_type == 'unsupervised':
+        config_issues.append("Au moins 2 variables requises pour le clustering")
     
     if not st.session_state.selected_models_for_training:
-        config_errors.append("Aucun modèle sélectionné")
+        config_issues.append("Aucun modèle sélectionné")
     
-    # Affichage du récapitulatif
-    with st.expander("📋 Récapitulatif de la Configuration", expanded=True):
-        if config_errors:
+    # Vérifications de qualité spécifiques
+    if task_type == 'unsupervised':
+        if not st.session_state.preprocessing_choices.get('scale_features', True):
+            config_warnings.append("⚠️ La normalisation est CRITIQUE pour le clustering!")
+        
+        if len(st.session_state.feature_list_for_ml_config) > 15:
+            config_warnings.append("Beaucoup de variables - risque de malédiction dimensionnelle")
+    
+    elif task_type == 'classification':
+        if len(st.session_state.feature_list_for_ml_config) > 30:
+            config_warnings.append("Beaucoup de features - risque de surapprentissage")
+    
+    if len(st.session_state.selected_models_for_training) > 5:
+        config_warnings.append("Beaucoup de modèles sélectionnés (temps long)")
+    
+    # Récapitulatif de configuration adapté
+    with st.expander("📋 Récapitulatif Configuration", expanded=True):
+        if config_issues:
             st.error("❌ Configuration incomplète:")
-            for error in config_errors:
-                st.write(f"• {error}")
+            for issue in config_issues:
+                st.write(f"• {issue}")
         else:
             st.success("✅ Configuration valide")
-            
+        
+        if config_warnings:
+            st.warning("⚠️ Avertissements:")
+            for warning in config_warnings:
+                st.write(f"• {warning}")
+        
+        # Détails de la configuration adaptés au type de tâche
+        if not config_issues:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.write("**Données**")
-                st.write(f"• Cible: `{st.session_state.target_column_for_ml_config}`")
-                st.write(f"• Features: {len(st.session_state.feature_list_for_ml_config)} variables")
-                st.write(f"• Test: {st.session_state.test_split_for_ml_config}%")
-                
+                st.markdown("**📊 Configuration Données**")
+                st.write(f"• Type: {task_type.upper()}")
+                if task_type != 'unsupervised':
+                    st.write(f"• Cible: `{st.session_state.target_column_for_ml_config}`")
+                st.write(f"• Features: {len(st.session_state.feature_list_for_ml_config)}")
+                if task_type != 'unsupervised':
+                    st.write(f"• Test: {st.session_state.test_split_for_ml_config}%")
+                else:
+                    st.write("• Test: 0% (clustering)")
+            
             with col2:
-                st.write("**Modèles**")
-                st.write(f"• {len(st.session_state.selected_models_for_training)} modèles")
+                st.markdown("**🤖 Configuration Modèles**")
+                st.write(f"• Modèles: {len(st.session_state.selected_models_for_training)}")
                 st.write(f"• Optimisation: {'✅' if st.session_state.optimize_hp_for_ml_config else '❌'}")
-                st.write(f"• SMOTE: {'✅' if st.session_state.preprocessing_choices.get('use_smote') else '❌'}")
+                
+                if task_type == 'classification':
+                    st.write(f"• SMOTE: {'✅' if st.session_state.preprocessing_choices.get('use_smote') else '❌'}")
+                
+                st.write(f"• Normalisation: {'✅' if st.session_state.preprocessing_choices.get('scale_features') else '❌'}")
     
-    # Bouton de lancement
-    col_btn, col_info = st.columns([1, 2])
+    # Boutons d'action
+    col_launch, col_reset, col_info = st.columns([2, 1, 2])
     
-    with col_btn:
-        launch_disabled = len(config_errors) > 0 or st.session_state.get('ml_training_in_progress', False)
+    with col_launch:
+        launch_disabled = len(config_issues) > 0 or st.session_state.get('ml_training_in_progress', False)
         
-        if st.button(
-            "🚀 Lancer l'Expérimentation", 
-            type="primary", 
+        launch_button = st.button(
+            "🚀 Lancer l'Expérimentation",
+            type="primary",
             use_container_width=True,
             disabled=launch_disabled,
-            help="Démarrer l'entraînement des modèles"
-        ):
+            help="Démarrer l'entraînement avec la configuration actuelle"
+        )
+        
+        if launch_button:
+            # Préparation du lancement
             st.session_state.ml_training_in_progress = True
             st.session_state.ml_last_training_time = time.time()
             
-            # Lancement de l'entraînement
-            with st.spinner("🧠 Entraînement des modèles en cours... Cette opération peut prendre plusieurs minutes."):
+            # Configuration finale adaptée au type de tâche
+            training_config = {
+                'df': df,
+                'target_column': st.session_state.target_column_for_ml_config,
+                'model_names': st.session_state.selected_models_for_training,
+                'task_type': task_type,
+                'test_size': st.session_state.test_split_for_ml_config / 100 if task_type != 'unsupervised' else 0.0,
+                'optimize': st.session_state.optimize_hp_for_ml_config,
+                'feature_list': st.session_state.feature_list_for_ml_config,
+                'use_smote': st.session_state.preprocessing_choices.get('use_smote', False),
+                'preprocessing_choices': st.session_state.preprocessing_choices
+            }
+            
+            # Lancement avec monitoring
+            with st.status("🚀 Expérimentation en cours...", expanded=True) as status:
                 try:
-                    results = train_models(
-                        df=st.session_state.df,
-                        target_column=st.session_state.target_column_for_ml_config,
-                        model_names=st.session_state.selected_models_for_training,
-                        task_type=st.session_state.task_type,
-                        test_size=st.session_state.test_split_for_ml_config / 100,
-                        optimize=st.session_state.optimize_hp_for_ml_config,
-                        feature_list=st.session_state.feature_list_for_ml_config,
-                        use_smote=st.session_state.preprocessing_choices.get('use_smote', False),
-                        preprocessing_choices=st.session_state.preprocessing_choices
+                    start_time = time.time()
+                    
+                    # Étapes détaillées adaptées
+                    status.write("📊 Préparation des données...")
+                    time.sleep(0.5)
+                    
+                    status.write("🤖 Entraînement des modèles...")
+                    
+                    # Appel principal
+                    results = train_models(**training_config)
+                    
+                    elapsed_time = time.time() - start_time
+                    status.update(
+                        label=f"✅ Expérimentation terminée en {elapsed_time:.1f}s",
+                        state="complete"
                     )
                     
+                    # Sauvegarde des résultats
                     st.session_state.ml_results = results
                     st.session_state.ml_training_in_progress = False
                     st.session_state.ml_error_count = 0
                     
-                    st.success("✅ Expérimentation terminée avec succès!")
+                    # Analyse rapide des résultats adaptée
+                    successful_models = [r for r in results if not r.get('metrics', {}).get('error')]
+                    failed_models = [r for r in results if r.get('metrics', {}).get('error')]
+                    
+                    st.success(f"✅ Expérimentation terminée! {len(successful_models)}/{len(results)} modèles réussis")
+                    
+                    if successful_models:
+                        # Affichage du meilleur modèle adapté
+                        if task_type == 'classification':
+                            best_model = max(successful_models, key=lambda x: x.get('metrics', {}).get('accuracy', 0))
+                            best_score = best_model.get('metrics', {}).get('accuracy', 0)
+                            st.info(f"🏆 Meilleur modèle: **{best_model['model_name']}** (Accuracy: {best_score:.3f})")
+                        elif task_type == 'regression':
+                            best_model = max(successful_models, key=lambda x: x.get('metrics', {}).get('r2', -999))
+                            best_score = best_model.get('metrics', {}).get('r2', 0)
+                            st.info(f"🏆 Meilleur modèle: **{best_model['model_name']}** (R²: {best_score:.3f})")
+                        else:  # unsupervised
+                            best_model = max(successful_models, key=lambda x: x.get('metrics', {}).get('silhouette_score', -999))
+                            best_score = best_model.get('metrics', {}).get('silhouette_score', 0)
+                            st.info(f"🏆 Meilleur modèle: **{best_model['model_name']}** (Silhouette: {best_score:.3f})")
+                    
+                    if failed_models:
+                        st.warning(f"⚠️ {len(failed_models)} modèles ont échoué")
+                    
+                    # Navigation
                     st.balloons()
-                    
-                    # Affichage des résultats
-                    st.subheader("📊 Résultats de l'Expérimentation")
-                    
-                    successful_models = 0
-                    for res in results:
-                        if res['metrics'].get('error'):
-                            st.error(f"**{res['model_name']}**: ❌ Échec - {res['metrics']['error']}")
-                        else:
-                            successful_models += 1
-                            # Score principal selon le type de tâche
-                            if st.session_state.task_type == "classification":
-                                score = res['metrics'].get('accuracy', 0)
-                                st.success(f"**{res['model_name']}**: ✅ Exactitude = {score:.3f}")
-                            elif st.session_state.task_type == "regression":
-                                score = res['metrics'].get('r2', 0)
-                                st.success(f"**{res['model_name']}**: ✅ R² = {score:.3f}")
-                            else:
-                                score = res['metrics'].get('silhouette_score', 0)
-                                st.success(f"**{res['model_name']}**: ✅ Score = {score:.3f}")
-                    
-                    st.info(f"📈 {successful_models}/{len(results)} modèles entraînés avec succès")
-                    
-                    # Navigation vers les résultats
-                    st.page_link("pages/4_📈_Évaluation_du_Modèle.py", label="📊 Voir les résultats détaillés", icon="📈")
+                    time.sleep(2)
+                    if st.button("📈 Voir les résultats détaillés"):
+                        st.switch_page("pages/3_📈_Évaluation_du_Modèle.py")
                     
                 except Exception as e:
                     st.session_state.ml_training_in_progress = False
-                    st.session_state.ml_error_count += 1
-                    st.error(f"❌ Erreur lors de l'entraînement: {str(e)}")
+                    st.session_state.ml_error_count = st.session_state.get('ml_error_count', 0) + 1
+                    
+                    error_msg = str(e)
+                    st.error(f"❌ Erreur durant l'entraînement: {error_msg[:200]}")
                     logger.error(f"Training failed: {e}", exc_info=True)
+                    
+                    status.update(
+                        label="❌ Expérimentation échouée",
+                        state="error"
+                    )
+    
+    with col_reset:
+        if st.button("🔄 Reset Config", use_container_width=True, help="Remet à zéro la configuration"):
+            # Reset sélectif des paramètres ML
+            ml_keys_to_reset = [
+                'target_column_for_ml_config',
+                'feature_list_for_ml_config',
+                'selected_models_for_training',
+                'ml_results',
+                'task_type'
+            ]
+            for key in ml_keys_to_reset:
+                if key in st.session_state:
+                    del st.session_state[key]
+            
+            st.session_state.current_step = 1
+            st.success("Configuration réinitialisée")
+            st.rerun()
     
     with col_info:
-        if st.session_state.get('ml_training_in_progress', False):
-            st.info("⏳ Entraînement en cours... Veuillez patienter.")
+        # État actuel
+        if st.session_state.get('ml_training_in_progress'):
+            st.info("⏳ Entraînement en cours...")
         elif st.session_state.get('ml_last_training_time'):
-            last_time = st.session_state.ml_last_training_time
-            st.caption(f"Dernier entraînement: {time.strftime('%H:%M:%S', time.localtime(last_time))}")
+            last_time = time.strftime('%H:%M:%S', time.localtime(st.session_state.ml_last_training_time))
+            st.caption(f"Dernier: {last_time}")
         
         if st.session_state.get('ml_error_count', 0) > 0:
-            st.warning(f"⚠️ {st.session_state.ml_error_count} erreur(s) lors des entraînements")
+            st.warning(f"⚠️ {st.session_state.ml_error_count} erreurs")
 
-# Footer avec monitoring
+# Footer avec monitoring et navigation
 st.markdown("---")
-footer_col1, footer_col2, footer_col3 = st.columns(3)
+footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
 
 with footer_col1:
-    if st.session_state.get('ml_error_count', 0) > 0:
-        st.caption(f"⚠️ Erreurs ML: {st.session_state.ml_error_count}")
+    progress = (st.session_state.current_step / 4) * 100
+    st.caption(f"📊 Étape {st.session_state.current_step}/4 ({progress:.0f}%)")
 
 with footer_col2:
-    current_time = time.strftime("%H:%M:%S")
-    st.caption(f"⏰ Session: {current_time}")
+    task_type_display = st.session_state.get('task_type', 'Non défini')
+    st.caption(f"🎯 {task_type_display.upper()}")
 
 with footer_col3:
-    if st.button("🧹 Nettoyer cache ML", help="Libère la mémoire des modèles"):
-        gc.collect()
-        if 'ml_results' in st.session_state:
-            del st.session_state.ml_results
-        st.success("Cache ML nettoyé")
-        st.rerun()
-
-# Gestion d'erreurs globale
-if st.session_state.get('ml_error_count', 0) > 5:
-    st.error("⚠️ Plusieurs erreurs détectées. Considérez recharger l'application.")
-    if st.button("🔄 Recharger la page ML"):
-        st.session_state.ml_error_count = 0
-        st.rerun()
-
-# Ajoutez cette fonction dans votre Configuration_ML.py
-def clear_cache_and_restart():
-    """Nettoie le cache et redémarre l'application"""
     try:
-        st.cache_data.clear()
-        st.success("Cache nettoyé avec succès!")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Erreur lors du nettoyage du cache : {e}")
+        sys_memory = psutil.virtual_memory().percent
+        color = "🔴" if sys_memory > 85 else "🟡" if sys_memory > 70 else "🟢"
+        st.caption(f"{color} RAM: {sys_memory:.0f}%")
+    except:
+        st.caption("🔧 RAM: N/A")
 
-# Bouton de nettoyage dans la sidebar
-if st.sidebar.button("🔄 Nettoyer le cache"):
-    clear_cache_and_restart()
+with footer_col4:
+    st.caption(f"⏰ {time.strftime('%H:%M:%S')}")
+
+# Navigation entre les étapes
+st.markdown("---")
+nav_col1, nav_col2, nav_col3, nav_col4 = st.columns(4)
+
+with nav_col1:
+    if st.session_state.current_step > 1:
+        if st.button("◀️ Étape précédente", use_container_width=True):
+            st.session_state.current_step -= 1
+            st.rerun()
+
+with nav_col4:
+    if st.session_state.current_step < 4:
+        if st.button("Étape suivante ▶️", use_container_width=True, type="primary"):
+            # Validation avant passage à l'étape suivante
+            if st.session_state.current_step == 1:
+                if st.session_state.task_type in ['classification', 'regression'] and not st.session_state.target_column_for_ml_config:
+                    st.error("Veuillez sélectionner une variable cible")
+                elif not st.session_state.feature_list_for_ml_config:
+                    st.error("Veuillez sélectionner au moins une variable")
+                else:
+                    st.session_state.current_step += 1
+                    st.rerun()
+            else:
+                st.session_state.current_step += 1
+                st.rerun()
+
+# Debug conditionnel
+if os.getenv("DEBUG_MODE", "false").lower() == "true":
+    with st.expander("🔍 Debug ML Config", expanded=False):
+        debug_info = {
+            "current_step": st.session_state.current_step,
+            "task_type": st.session_state.get('task_type'),
+            "target_column": st.session_state.get('target_column_for_ml_config'),
+            "num_features": len(st.session_state.get('feature_list_for_ml_config', [])),
+            "num_models": len(st.session_state.get('selected_models_for_training', [])),
+            "test_split": st.session_state.get('test_split_for_ml_config'),
+            "training_in_progress": st.session_state.get('ml_training_in_progress', False),
+            "error_count": st.session_state.get('ml_error_count', 0)
+        }
+        st.json(debug_info)

@@ -683,3 +683,19 @@ def compare_models_performance(models_metrics: Dict[str, Dict]) -> Dict[str, Any
         logger.error(f"❌ Erreur compare_models_performance: {e}")
     
     return comparison
+
+import psutil
+def get_system_metrics():
+    """
+    Retourne les métriques système utiles pour le suivi des ressources.
+    """
+    try:
+        return {
+            "cpu_percent": psutil.cpu_percent(interval=0.5),
+            "memory_percent": psutil.virtual_memory().percent,
+            "available_memory": psutil.virtual_memory().available / (1024 ** 3),  # en Go
+            "total_memory": psutil.virtual_memory().total / (1024 ** 3),          # en Go
+            "disk_usage": psutil.disk_usage('/').percent
+        }
+    except Exception as e:
+        return {"error": str(e)}

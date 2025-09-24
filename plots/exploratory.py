@@ -11,6 +11,7 @@ from . import templates  # Fichier de templates
 
 logger = logging.getLogger(__name__)
 
+@st.cache_data
 def plot_overview_metrics(profile: dict):
     """Affiche les métriques clés du dataset sous forme de subplot."""
     try:
@@ -40,6 +41,7 @@ def plot_overview_metrics(profile: dict):
         logger.error(f"Erreur lors de la génération des métriques clés : {str(e)}")
         return None
 
+@st.cache_data
 def plot_missing_values_overview(_df: pd.DataFrame):
     """Crée un graphique à barres du nombre de valeurs manquantes par colonne."""
     try:
@@ -63,6 +65,7 @@ def plot_missing_values_overview(_df: pd.DataFrame):
         logger.error(f"Erreur lors de la génération du graphique des valeurs manquantes : {str(e)}")
         return None
 
+@st.cache_data
 def plot_cardinality_overview(_df: pd.DataFrame, column_types: dict):
     """Crée un graphique à barres de la cardinalité pour les variables catégoriques et textuelles."""
     try:
@@ -81,6 +84,7 @@ def plot_cardinality_overview(_df: pd.DataFrame, column_types: dict):
         logger.error(f"Erreur lors de la génération du graphique de cardinalité : {str(e)}")
         return None
 
+@st.cache_data
 def plot_distribution(series: pd.Series, name: str):
     """Crée un histogramme et un box plot pour une variable numérique."""
     try:
@@ -107,6 +111,7 @@ def plot_distribution(series: pd.Series, name: str):
         logger.error(f"Erreur lors de la génération de la distribution pour {name} : {str(e)}")
         return None
 
+@st.cache_data
 def plot_bivariate_analysis(df: pd.DataFrame, col1: str, col2: str, type1: str, type2: str):
     """Génère le graphique approprié pour une analyse bivariée."""
     try:

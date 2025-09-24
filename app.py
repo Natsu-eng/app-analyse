@@ -10,6 +10,23 @@ from utils.logging_config import setup_logging
 from typing import Dict, Any
 import gc
 
+def _get_production_css():
+    return """
+    <style>
+    #MainMenu {visibility: hidden;}
+    .stDeployButton {display:none;}
+    footer {visibility: hidden;}
+    #stDecoration {display:none;}
+    .stAlert > div  {
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+    }
+    .main > div {
+        padding-top: 1rem;
+    }
+    </style>
+    """
+
 # --- Configuration Production ---
 def setup_production_environment():
     """Configuration pour l'environnement de production"""
@@ -27,22 +44,7 @@ def setup_production_environment():
         
         # Masquer les éléments Streamlit en production
         if os.getenv('STREAMLIT_ENV') == 'production':
-            hide_streamlit_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            .stDeployButton {display:none;}
-            footer {visibility: hidden;}
-            #stDecoration {display:none;}
-            .stAlert > div  {
-                padding-top: 0.5rem;
-                padding-bottom: 0.5rem;
-            }
-            .main > div {
-                padding-top: 1rem;
-            }
-            </style>
-            """
-            st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+            st.markdown(_get_production_css(), unsafe_allow_html=True)
 
 # --- Initialisation ---
 setup_production_environment()

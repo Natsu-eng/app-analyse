@@ -5,23 +5,24 @@ from datetime import datetime
 import sys
 
 def setup_logging(
-    log_level: str = "INFO",
     log_file: str = "datalab_pro.log",
     max_file_size_mb: int = 10,
     backup_count: int = 5,
     console_logging: bool = True
 ):
     """
-    Configuration du système de logging pour la production.
+    Configuration du système de logging pour la production, avec niveau configurable.
     
     Args:
-        log_level: Niveau de logging (DEBUG, INFO, WARNING, ERROR)
         log_file: Nom du fichier de log
         max_file_size_mb: Taille maximale du fichier de log en MB
         backup_count: Nombre de fichiers de sauvegarde à conserver
         console_logging: Si True, affiche aussi les logs dans la console
     """
     
+    # CORRECTION: Lire le niveau de log depuis une variable d'environnement
+    log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+
     # Créer le dossier logs s'il n'existe pas
     log_dir = "logs"
     if not os.path.exists(log_dir):
@@ -30,7 +31,7 @@ def setup_logging(
     log_file_path = os.path.join(log_dir, log_file)
     
     # Configuration du niveau de log
-    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+    numeric_level = getattr(logging, log_level_str, logging.INFO)
     
     # Format des logs
     log_format = logging.Formatter(
@@ -60,7 +61,9 @@ def setup_logging(
     # Handler pour console (optionnel)
     if console_logging:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.WARNING)  # Seulement warnings et erreurs en console
+        # En mode DEBUG, la console est aussi plus verbeuse
+        console_level = logging.DEBUG if log_level_str == 'DEBUG' else logging.WARNING
+        console_handler.setLevel(console_level)
         console_format = logging.Formatter('%(levelname)s - %(message)s')
         console_handler.setFormatter(console_format)
         root_logger.addHandler(console_handler)
@@ -74,7 +77,7 @@ def setup_logging(
     
     # Log de démarrage
     logger = logging.getLogger(__name__)
-    logger.info(f"Logging system initialized - Level: {log_level} - File: {log_file_path}")
+    logger.info(f"Logging system initialized - Level: {log_level_str} - File: {log_file_path}")
     logger.info(f"Application started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     return logger

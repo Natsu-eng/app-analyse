@@ -7,6 +7,7 @@ import logging
 import re
 import psutil
 import gc
+from functools import wraps
 from utils.data_analysis import (
     compute_if_dask,
     is_dask_dataframe,
@@ -25,117 +26,193 @@ from plots.exploratory import (
 
 # Configuration du logging
 logging.basicConfig(
-    filename='app.log',
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/dashboard.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Configuration Streamlit
 st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
+
+# Configuration production
+def setup_production_dashboard():
+    """Configuration pour l'environnement de production du dashboard"""
+    if os.getenv('STREAMLIT_ENV') == 'production':
+        hide_streamlit_style = """
+        <style>
+        #MainMenu {visibility: hidden;}
+        .stDeployButton {display:none;}
+        footer {visibility: hidden;}
+        #stDecoration {display:none;}
+        .stAlert > div {padding: 0.5rem;}
+        </style>
+        """
+        st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+setup_production_dashboard()
+
+# Décorateur de monitoring pour les fonctions critiques
+def monitor_execution(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            if elapsed > 5:
+                logger.warning(f"{func.__name__} took {elapsed:.2f}s")
+            return result
+        except Exception as e:
+            logger.error(f"Error in {func.__name__}: {e}")
+            raise
+    return wrapper
+
 st.title("📊 Dashboard Exploratoire")
 
-# Initialisation stable des états
-def initialize_session_state():
-    """Initialise les variables de session de manière stable"""
-    if 'widget_key_counter' not in st.session_state:
-        st.session_state.widget_key_counter = 0
-    if 'column_types' not in st.session_state:
-        st.session_state.column_types = None
-    if 'rename_list' not in st.session_state:
-        st.session_state.rename_list = []
-    if 'columns_to_drop' not in st.session_state:
-        st.session_state.columns_to_drop = []
-    if 'useless_candidates' not in st.session_state:
-        st.session_state.useless_candidates = []
-    if 'dataset_hash' not in st.session_state:
-        st.session_state.dataset_hash = None
+# Initialisation stable des états avec pattern défensif
+def initialize_dashboard_state():
+    """Initialise les variables de session de manière défensive et stable"""
+    defaults = {
+        'column_types': None,
+        'rename_list': [],
+        'columns_to_drop': [],
+        'useless_candidates': [],
+        'dataset_hash': None,
+        'last_memory_check': 0,
+        'dashboard_cache_version': 1
+    }
+    
+    for key, default_value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
 
-initialize_session_state()
+initialize_dashboard_state()
 
-# Validation des noms de colonnes
+# Monitoring système périodique
+def check_system_resources():
+    """Vérifie les ressources système de manière non-bloquante"""
+    current_time = time.time()
+    if current_time - st.session_state.last_memory_check > 120:  # Check tous les 2 minutes
+        try:
+            memory_percent = psutil.virtual_memory().percent
+            if memory_percent > 85:
+                st.warning(f"⚠️ Utilisation mémoire élevée: {memory_percent:.1f}%")
+                col_warn, col_clean = st.columns([3, 1])
+                with col_clean:
+                    if st.button("🧹 Libérer", help="Nettoyer la mémoire"):
+                        cleanup_memory()
+                        st.success("✅ Nettoyé")
+                        st.rerun()
+            st.session_state.last_memory_check = current_time
+        except Exception as e:
+            logger.error(f"System check failed: {e}")
+
+check_system_resources()
+
+# Validation robuste des noms de colonnes
 def is_valid_column_name(name: str) -> bool:
-    """
-    Vérifie si un nom de colonne est valide (alphanumérique, underscores, pas de caractères spéciaux).
-    
-    Args:
-        name: Nom de la colonne à valider
-    
-    Returns:
-        Booléen indiquant si le nom est valide
-    """
-    if not name or not isinstance(name, str):
+    """Vérifie la validité d'un nom de colonne avec validation stricte"""
+    if not name or not isinstance(name, str) or len(name.strip()) == 0:
         return False
-    return bool(re.match(r'^[a-zA-Z0-9_]+$', name))
+    name = name.strip()
+    # Autoriser lettres, chiffres, underscores, et tirets
+    return bool(re.match(r'^[a-zA-Z0-9_-]+$', name)) and len(name) <= 50
 
-# Vérification du chargement du DataFrame
-if 'df' not in st.session_state or st.session_state.df is None:
-    st.warning("Veuillez d'abord charger un jeu de données depuis la page d'accueil.")
-    st.page_link("app.py", label="Retour à l'accueil", icon="🏠")
-    st.stop()
+# Vérification et validation du DataFrame
+@monitor_execution
+def validate_dataframe():
+    """Valide la présence et l'intégrité du DataFrame"""
+    if 'df' not in st.session_state or st.session_state.df is None:
+        st.error("📊 Aucun dataset chargé")
+        st.info("Veuillez d'abord charger un jeu de données depuis la page d'accueil.")
+        if st.button("🏠 Retour à l'accueil"):
+            st.switch_page("app.py")
+        st.stop()
+    
+    df = st.session_state.df
+    
+    # Vérifications de base
+    try:
+        if hasattr(df, 'empty') and df.empty:
+            st.error("Le dataset est vide")
+            st.stop()
+        if len(df.columns) == 0:
+            st.error("Le dataset n'a pas de colonnes")
+            st.stop()
+    except Exception as e:
+        st.error(f"Erreur de validation du dataset: {e}")
+        st.stop()
+    
+    return df
 
-df = st.session_state.df
+df = validate_dataframe()
 
-# Fonction pour générer un hash stable du dataset
+# Fonction de hash stable et robuste
+@monitor_execution
 def get_dataset_hash(df):
     """Génère un hash stable basé sur la structure du dataset"""
     try:
         if is_dask_dataframe(df):
-            return f"{tuple(df.columns)}_{df.npartitions}_{str(df.dtypes.to_dict())}"
+            return f"dask_{hash(tuple(df.columns))}_{df.npartitions}_{st.session_state.dashboard_cache_version}"
         else:
-            return f"{tuple(df.columns)}_{df.shape[0]}_{str(df.dtypes.to_dict())}"
+            return f"pandas_{hash(tuple(df.columns))}_{df.shape[0]}_{st.session_state.dashboard_cache_version}"
     except Exception as e:
-        logger.error(f"Erreur lors du calcul du hash: {e}")
-        return str(time.time())
+        logger.error(f"Hash calculation error: {e}")
+        return f"fallback_{time.time()}"
 
-# Vérifier si le dataset a changé
+# Vérification du changement de dataset avec mécanisme de cache intelligent
 current_hash = get_dataset_hash(df)
 if st.session_state.dataset_hash != current_hash:
     st.session_state.dataset_hash = current_hash
-    st.session_state.column_types = None  # Forcer la recalculation
-    logger.info(f"Dataset changé, nouveau hash: {current_hash}")
+    st.session_state.column_types = None
+    logger.info(f"Dataset changed, new hash: {current_hash}")
 
-# -----------------------
-# Métriques globales avec cache optimisé
-# -----------------------
-@st.cache_data(
-    hash_funcs={
-        pd.DataFrame: lambda x: get_dataset_hash(x),
-        dd.DataFrame: lambda x: get_dataset_hash(x)
-    },
-    ttl=300  # Cache pendant 5 minutes
-)
+# Cache optimisé pour les métriques globales
+@st.cache_data(ttl=300, max_entries=10)
+@monitor_execution
 def compute_global_metrics(_df):
-    """Calcule les métriques globales du dataset."""
+    """Calcule les métriques globales avec gestion d'erreurs robuste"""
     try:
         start_time = time.time()
-        n_rows = compute_if_dask(_df.shape[0])
-        n_cols = _df.shape[1]
         
-        # Calcul sécurisé des valeurs manquantes
+        # Calculs de base avec fallbacks
+        try:
+            n_rows = compute_if_dask(_df.shape[0])
+        except Exception:
+            n_rows = len(_df) if hasattr(_df, '__len__') else 0
+            
+        n_cols = _df.shape[1] if hasattr(_df, 'shape') else 0
+        
+        # Valeurs manquantes avec gestion d'erreur
         try:
             total_missing = compute_if_dask(_df.isna().sum().sum())
+            missing_percentage = (total_missing / (n_rows * n_cols)) * 100 if (n_rows * n_cols) > 0 else 0
         except Exception as e:
-            logger.warning(f"Failed to compute missing values: {e}")
+            logger.warning(f"Missing values calculation failed: {e}")
             total_missing = 0
-            
-        missing_percentage = (total_missing / (n_rows * n_cols)) * 100 if (n_rows * n_cols) > 0 else 0
+            missing_percentage = 0
         
-        # Calcul sécurisé des doublons
+        # Doublons avec gestion d'erreur
         try:
             duplicate_rows = compute_if_dask(_df.duplicated().sum())
         except Exception as e:
-            logger.warning(f"Failed to compute duplicates: {e}")
+            logger.warning(f"Duplicates calculation failed: {e}")
             duplicate_rows = 0
         
-        if not is_dask_dataframe(_df):
-            try:
+        # Usage mémoire
+        memory_usage = "N/A"
+        try:
+            if not is_dask_dataframe(_df):
                 memory_usage = compute_if_dask(_df.memory_usage(deep=True).sum()) / (1024**2)
-            except:
-                memory_usage = 0
-        else:
-            memory_usage = "inconnu (Dask)"
-            
+            else:
+                memory_usage = f"Dask ({_df.npartitions} partitions)"
+        except Exception as e:
+            logger.debug(f"Memory calculation failed: {e}")
+        
         elapsed_time = time.time() - start_time
         logger.info(f"Global metrics computed in {elapsed_time:.2f}s")
         
@@ -147,54 +224,44 @@ def compute_global_metrics(_df):
             'memory_usage': memory_usage
         }
     except Exception as e:
-        logger.error(f"Erreur dans compute_global_metrics: {e}")
+        logger.error(f"Critical error in compute_global_metrics: {e}")
         return {
-            'n_rows': 0,
-            'n_cols': 0,
-            'missing_percentage': 0,
-            'duplicate_rows': 0,
-            'memory_usage': 0
+            'n_rows': 0, 'n_cols': 0, 'missing_percentage': 0,
+            'duplicate_rows': 0, 'memory_usage': 'Error'
         }
 
-# -----------------------
-# Détection automatique des types avec cache optimisé
-# -----------------------
-@st.cache_data(
-    hash_funcs={
-        pd.DataFrame: lambda x: get_dataset_hash(x),
-        dd.DataFrame: lambda x: get_dataset_hash(x)
-    },
-    ttl=300
-)
+# Cache pour la détection des types de colonnes
+@st.cache_data(ttl=300, max_entries=5)
+@monitor_execution
 def cached_auto_detect_column_types(_df):
-    """Met en cache la détection des types de colonnes."""
+    """Cache la détection des types avec fallback sécurisé"""
     try:
-        start_time = time.time()
         result = auto_detect_column_types(_df)
-        elapsed_time = time.time() - start_time
-        logger.info(f"Column types detected in {elapsed_time:.2f}s")
+        # Validation du résultat
+        required_keys = ['numeric', 'categorical', 'text_or_high_cardinality', 'datetime']
+        for key in required_keys:
+            if key not in result:
+                result[key] = []
         return result
     except Exception as e:
-        logger.error(f"Erreur dans cached_auto_detect_column_types: {e}")
+        logger.error(f"Column type detection failed: {e}")
         return {'numeric': [], 'categorical': [], 'text_or_high_cardinality': [], 'datetime': []}
 
-# Calculer les types de colonnes si nécessaire
+# Calculer ou récupérer les types de colonnes
 if st.session_state.column_types is None:
-    with st.spinner("Analyse des types de colonnes..."):
+    with st.spinner("🔍 Analyse des types de colonnes..."):
         st.session_state.column_types = cached_auto_detect_column_types(df)
 
 column_types = st.session_state.column_types
 
-# Assurer que toutes les clés nécessaires existent
+# Validation et nettoyage des types de colonnes
 required_keys = ['numeric', 'categorical', 'text_or_high_cardinality', 'datetime']
 for key in required_keys:
-    if key not in column_types:
+    if key not in column_types or not isinstance(column_types[key], list):
         column_types[key] = []
 
-# -----------------------
-# Vue d'ensemble
-# -----------------------
-st.header("Vue d'ensemble du jeu de données")
+# Vue d'ensemble avec gestion d'erreurs
+st.header("📋 Vue d'ensemble du jeu de données")
 
 try:
     overview_metrics = compute_global_metrics(df)
@@ -202,25 +269,27 @@ try:
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Impossible d'afficher les métriques globales")
+        st.info("Graphique des métriques non disponible")
 except Exception as e:
     st.error(f"Erreur lors du calcul des métriques: {e}")
-    logger.error(f"Erreur métriques globales: {e}")
+    logger.error(f"Overview metrics error: {e}")
 
-# Créer les onglets avec des clés stables
+# Information sur les colonnes avec truncature pour l'affichage
+col_display = list(df.columns)
+if len(col_display) > 10:
+    col_info = f"Colonnes ({len(col_display)}): {', '.join(col_display[:8])}, ... +{len(col_display)-8} autres"
+else:
+    col_info = f"Colonnes ({len(col_display)}): {', '.join(col_display)}"
+st.info(col_info)
+
+# Onglets avec clés stables et uniques
 tab_overview, tab_univariate, tab_bivariate, tab_preview, tab_cleaning = st.tabs([
-    "📈 Qualité des Données", 
-    "🔬 Analyse par Variable", 
-    "🔗 Relations Bivariées", 
-    "📄 Aperçu des Données Brutes", 
-    "🗑️ Nettoyage des Colonnes"
+    "📈 Qualité", "🔬 Variables", "🔗 Relations", "📄 Aperçu", "🗑️ Nettoyage"
 ])
 
-# -----------------------
-# Qualité des données
-# -----------------------
+# Onglet Qualité des données
 with tab_overview:
-    st.subheader("Valeurs Manquantes et Cardinalité")
+    st.subheader("📊 Valeurs Manquantes et Cardinalité")
     col1, col2 = st.columns(2)
     
     with col1:
@@ -229,10 +298,10 @@ with tab_overview:
             if missing_fig:
                 st.plotly_chart(missing_fig, use_container_width=True)
             else:
-                st.info("Aucune valeur manquante détectée.")
+                st.info("✅ Aucune valeur manquante détectée")
         except Exception as e:
-            st.warning(f"Erreur lors de l'affichage des valeurs manquantes: {e}")
-            logger.error(f"Erreur plot missing values: {e}")
+            st.warning(f"Erreur valeurs manquantes: {str(e)[:100]}")
+            logger.error(f"Missing values plot error: {e}")
     
     with col2:
         try:
@@ -240,217 +309,242 @@ with tab_overview:
             if cardinality_fig:
                 st.plotly_chart(cardinality_fig, use_container_width=True)
             else:
-                st.info("Aucun graphique de cardinalité disponible.")
+                st.info("📊 Cardinalité uniforme")
         except Exception as e:
-            st.warning(f"Erreur lors de l'affichage de la cardinalité: {e}")
-            logger.error(f"Erreur plot cardinality: {e}")
+            st.warning(f"Erreur cardinalité: {str(e)[:100]}")
+            logger.error(f"Cardinality plot error: {e}")
 
-# -----------------------
-# Analyse univariée avec clés stables
-# -----------------------
+# Onglet Analyse univariée avec sélection stable
 with tab_univariate:
-    st.subheader("Analyse Approfondie d'une Variable")
+    st.subheader("🔍 Analyse d'une Variable")
     available_columns = list(df.columns)
     
     if available_columns:
-        selected_col_index = st.selectbox(
-            "Choisissez une variable à analyser",
-            options=range(len(available_columns)),
-            format_func=lambda x: available_columns[x],
-            key="univariate_column_selector"
-        )
-        selected_col = available_columns[selected_col_index]
-        
-        if selected_col and selected_col in df.columns:
-            try:
+        # Utilisation d'un sélecteur stable basé sur l'index
+        try:
+            # État persistent pour la sélection
+            if 'selected_col_index_univar' not in st.session_state:
+                st.session_state.selected_col_index_univar = 0
+            
+            selected_index = st.selectbox(
+                "Variable à analyser",
+                options=range(len(available_columns)),
+                format_func=lambda x: f"{available_columns[x]} ({'num' if available_columns[x] in column_types.get('numeric', []) else 'cat'})",
+                index=st.session_state.selected_col_index_univar,
+                key="univar_selector"
+            )
+            
+            # Mise à jour de l'état seulement si changement
+            if selected_index != st.session_state.selected_col_index_univar:
+                st.session_state.selected_col_index_univar = selected_index
+            
+            selected_col = available_columns[selected_index]
+            
+            if selected_col in df.columns:
                 col_type = 'numeric' if selected_col in column_types.get('numeric', []) else 'categorical'
                 
-                # Échantillonnage intelligent et sécurisé
-                sample_size = min(50000, compute_if_dask(df.shape[0]))
-                if is_dask_dataframe(df) and df.npartitions > 1:
-                    try:
-                        sample_df = df.sample(frac=min(0.1, sample_size / compute_if_dask(df.shape[0]))).head(sample_size)
-                    except:
-                        sample_df = df.head(sample_size)
-                else:
-                    sample_df = df.head(sample_size)
-                
-                sample_df = compute_if_dask(sample_df)
-
-                if col_type == 'numeric':
-                    if sample_df[selected_col].empty or sample_df[selected_col].isna().all():
-                        st.warning(f"Aucune donnée valide pour la colonne {selected_col}.")
+                # Échantillonnage sécurisé et optimisé
+                try:
+                    max_sample = min(30000, compute_if_dask(df.shape[0]))
+                    
+                    if is_dask_dataframe(df):
+                        sample_df = df.sample(frac=min(0.1, max_sample / compute_if_dask(df.shape[0]))).head(max_sample)
+                        sample_df = compute_if_dask(sample_df)
                     else:
-                        fig = plot_distribution(sample_df[selected_col], selected_col)
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
+                        sample_df = df.head(max_sample) if len(df) <= max_sample else df.sample(n=max_sample, random_state=42)
+                    
+                    if col_type == 'numeric':
+                        col_data = sample_df[selected_col].dropna()
+                        if len(col_data) == 0:
+                            st.warning(f"❌ Aucune donnée valide pour {selected_col}")
                         else:
-                            st.info("Impossible d'afficher le graphique de distribution.")
-                else:
-                    st.write(f"Analyse de la variable catégorielle: **{selected_col}**")
-                    try:
-                        value_counts = sample_df[selected_col].value_counts().head(20)
+                            # Statistiques rapides
+                            stats_col1, stats_col2, stats_col3 = st.columns(3)
+                            with stats_col1:
+                                st.metric("Moyenne", f"{col_data.mean():.3f}")
+                            with stats_col2:
+                                st.metric("Médiane", f"{col_data.median():.3f}")
+                            with stats_col3:
+                                st.metric("Écart-type", f"{col_data.std():.3f}")
+                            
+                            # Graphique de distribution
+                            fig = plot_distribution(col_data, selected_col)
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.write(f"**Variable catégorielle**: `{selected_col}`")
+                        value_counts = sample_df[selected_col].value_counts().head(15)
                         if not value_counts.empty:
-                            value_counts_df = value_counts.reset_index()
-                            value_counts_df.columns = ['Catégorie', 'Comptage']
-                            st.dataframe(value_counts_df, use_container_width=True)
+                            df_display = value_counts.reset_index()
+                            df_display.columns = ['Catégorie', 'Comptage']
+                            st.dataframe(df_display, use_container_width=True)
                         else:
-                            st.info("Aucune donnée à afficher pour cette variable.")
-                    except Exception as e:
-                        st.warning(f"Erreur lors de l'analyse catégorielle: {e}")
-                        
-            except Exception as e:
-                st.error(f"Erreur lors de l'analyse univariée: {e}")
-                logger.error(f"Erreur analyse univariée: {e}")
+                            st.info("Aucune donnée valide")
+                            
+                except Exception as e:
+                    st.error(f"Erreur analyse univariée: {str(e)[:100]}")
+                    logger.error(f"Univariate analysis error: {e}")
+        except Exception as e:
+            st.error(f"Erreur sélection variable: {e}")
     else:
-        st.warning("Aucune colonne disponible pour l'analyse.")
+        st.warning("Aucune colonne disponible")
 
-# -----------------------
-# Analyse bivariée avec clés stables
-# -----------------------
+# Onglet Analyse bivariée avec sélecteurs stables
 with tab_bivariate:
-    st.subheader("Analyse des Relations entre Deux Variables")
+    st.subheader("🔗 Relations entre Variables")
     available_columns = list(df.columns)
     
     if len(available_columns) >= 2:
         col1, col2 = st.columns(2)
         
-        with col1:
-            var1_index = st.selectbox(
-                "Variable 1", 
-                options=range(len(available_columns)),
-                format_func=lambda x: available_columns[x],
-                key="bivariate_var1"
-            )
-            var1 = available_columns[var1_index]
-            
-        with col2:
-            var2_index = st.selectbox(
-                "Variable 2", 
-                options=range(len(available_columns)),
-                format_func=lambda x: available_columns[x],
-                key="bivariate_var2",
-                index=1 if len(available_columns) > 1 else 0
-            )
-            var2 = available_columns[var2_index]
+        # États persistants pour les sélections bivariées
+        if 'bivar_var1_idx' not in st.session_state:
+            st.session_state.bivar_var1_idx = 0
+        if 'bivar_var2_idx' not in st.session_state:
+            st.session_state.bivar_var2_idx = min(1, len(available_columns) - 1)
         
-        if var1 != var2:
+        with col1:
+            var1_idx = st.selectbox(
+                "Variable 1",
+                options=range(len(available_columns)),
+                format_func=lambda x: available_columns[x],
+                index=st.session_state.bivar_var1_idx,
+                key="bivar_var1"
+            )
+            if var1_idx != st.session_state.bivar_var1_idx:
+                st.session_state.bivar_var1_idx = var1_idx
+            var1 = available_columns[var1_idx]
+        
+        with col2:
+            var2_idx = st.selectbox(
+                "Variable 2",
+                options=range(len(available_columns)),
+                format_func=lambda x: available_columns[x],
+                index=st.session_state.bivar_var2_idx,
+                key="bivar_var2"
+            )
+            if var2_idx != st.session_state.bivar_var2_idx:
+                st.session_state.bivar_var2_idx = var2_idx
+            var2 = available_columns[var2_idx]
+        
+        if var1 != var2 and var1 in df.columns and var2 in df.columns:
             try:
                 type1 = 'numeric' if var1 in column_types.get('numeric', []) else 'categorical'
                 type2 = 'numeric' if var2 in column_types.get('numeric', []) else 'categorical'
                 
-                # Échantillonnage pour l'analyse bivariée
-                sample_size = min(20000, compute_if_dask(df.shape[0]))
-                if is_dask_dataframe(df) and df.npartitions > 1:
-                    try:
-                        sample_df = df.sample(frac=min(0.05, sample_size / compute_if_dask(df.shape[0]))).head(sample_size)
-                    except:
-                        sample_df = df.head(sample_size)
-                else:
-                    sample_df = df.head(sample_size)
+                # Échantillonnage optimisé pour analyse bivariée
+                max_sample = min(15000, compute_if_dask(df.shape[0]))
                 
-                sample_df = compute_if_dask(sample_df)
+                if is_dask_dataframe(df):
+                    sample_df = df.sample(frac=min(0.05, max_sample / compute_if_dask(df.shape[0]))).head(max_sample)
+                    sample_df = compute_if_dask(sample_df)
+                else:
+                    sample_df = df.head(max_sample) if len(df) <= max_sample else df.sample(n=max_sample, random_state=42)
                 
                 if not sample_df[[var1, var2]].empty:
                     biv_fig = plot_bivariate_analysis(sample_df, var1, var2, type1, type2)
                     if biv_fig:
                         st.plotly_chart(biv_fig, use_container_width=True)
                     else:
-                        st.info("Aucun graphique bivarié disponible pour cette combinaison.")
+                        st.info("Graphique non disponible pour cette combinaison")
                 else:
-                    st.warning(f"Données insuffisantes pour l'analyse bivariée de {var1} et {var2}.")
+                    st.warning("Données insuffisantes")
                     
             except Exception as e:
-                st.error(f"Erreur lors de l'analyse bivariée: {e}")
-                logger.error(f"Erreur analyse bivariée: {e}")
+                st.error(f"Erreur analyse bivariée: {str(e)[:100]}")
+                logger.error(f"Bivariate analysis error: {e}")
         else:
-            st.warning("Veuillez sélectionner deux variables différentes.")
+            st.warning("Sélectionnez deux variables différentes")
     else:
-        st.warning("Au moins deux colonnes sont nécessaires pour l'analyse bivariée.")
+        st.warning("Au moins 2 colonnes nécessaires")
 
-# -----------------------
-# Aperçu des données brutes
-# -----------------------
+# Onglet Aperçu avec limitation de performance
 with tab_preview:
-    st.subheader("Aperçu des Données Brutes")
+    st.subheader("📄 Aperçu des Données")
     try:
         raw_df = st.session_state.get('df_raw', df)
-        preview_size = min(100, compute_if_dask(raw_df.shape[0]))
+        
+        # Contrôle intelligent de la taille d'aperçu
+        total_rows = compute_if_dask(raw_df.shape[0])
+        preview_size = min(50, total_rows)  # Limité à 50 lignes pour performance
+        
         raw_df_sample = compute_if_dask(raw_df.head(preview_size))
         
-        st.dataframe(raw_df_sample, height=400, use_container_width=True)
-        st.caption(f"Affichage des {preview_size} premières lignes sur {compute_if_dask(raw_df.shape[0])} au total.")
+        # Affichage avec hauteur limitée
+        st.dataframe(raw_df_sample, height=350, use_container_width=True)
+        st.caption(f"📊 Aperçu: {preview_size} lignes sur {total_rows:,} total")
         
     except Exception as e:
-        st.error(f"Erreur lors de l'affichage de l'aperçu: {e}")
-        logger.error(f"Erreur aperçu données: {e}")
+        st.error(f"Erreur aperçu: {str(e)[:100]}")
+        logger.error(f"Preview error: {e}")
 
-# -----------------------
-# Nettoyage et renommage avec gestion d'état améliorée
-# -----------------------
+# Onglet Nettoyage avec états stables et validation
 with tab_cleaning:
-    st.subheader("Nettoyage des Colonnes")
+    st.subheader("🧹 Nettoyage des Colonnes")
     
-    # Section Renommage
-    st.markdown("### 📝 Renommage des Colonnes")
+    # Section Renommage avec validation renforcée
+    st.markdown("### ✏️ Renommage")
     available_columns = list(df.columns)
     
     if available_columns:
         col_rename1, col_rename2 = st.columns([1, 1])
         
         with col_rename1:
-            col_to_rename_index = st.selectbox(
-                "Sélectionnez une colonne à renommer", 
+            # État persistent pour la colonne à renommer
+            if 'rename_col_idx' not in st.session_state:
+                st.session_state.rename_col_idx = 0
+            
+            rename_idx = st.selectbox(
+                "Colonne à renommer",
                 options=range(len(available_columns)),
                 format_func=lambda x: available_columns[x],
-                key="rename_column_selector"
+                index=st.session_state.rename_col_idx,
+                key="rename_selector"
             )
-            col_to_rename = available_columns[col_to_rename_index]
-            
+            col_to_rename = available_columns[rename_idx]
+        
         with col_rename2:
             new_name = st.text_input(
-                "Nouveau nom", 
+                "Nouveau nom",
                 value="",
-                key="new_column_name_input",
-                placeholder=f"nouveau_nom_pour_{col_to_rename}"
+                key="rename_input",
+                placeholder=f"nouveau_{col_to_rename}",
+                max_chars=50
             )
         
-        col_add_btn, col_clear_btn = st.columns([1, 1])
+        col_add, col_clear = st.columns([1, 1])
         
-        with col_add_btn:
-            if st.button("➕ Ajouter le renommage", key="add_rename_btn"):
-                if new_name.strip():
-                    new_name = new_name.strip()
-                    if new_name in df.columns:
-                        st.error("Ce nom de colonne existe déjà.")
-                    elif new_name == col_to_rename:
-                        st.warning("Le nouveau nom est identique à l'ancien.")
-                    elif not is_valid_column_name(new_name):
-                        st.error("Le nom de colonne doit être alphanumérique ou contenir des underscores (ex.: 'colonne_1').")
-                    else:
-                        existing_renames = [old for old, new in st.session_state.rename_list]
-                        if col_to_rename in existing_renames:
-                            st.warning(f"La colonne {col_to_rename} est déjà prévue pour renommage.")
-                        else:
-                            st.session_state.rename_list.append((col_to_rename, new_name))
-                            st.success(f"Renommage ajouté: {col_to_rename} → {new_name}")
-                            st.rerun()
+        with col_add:
+            if st.button("➕ Ajouter", key="add_rename", use_container_width=True):
+                new_name_clean = new_name.strip()
+                if not new_name_clean:
+                    st.error("❌ Nom vide")
+                elif new_name_clean in df.columns:
+                    st.error("❌ Nom déjà existant")
+                elif new_name_clean == col_to_rename:
+                    st.warning("⚠️ Nom identique")
+                elif not is_valid_column_name(new_name_clean):
+                    st.error("❌ Nom invalide (alphanumerique, _, - uniquement)")
+                elif any(old == col_to_rename for old, new in st.session_state.rename_list):
+                    st.warning(f"⚠️ {col_to_rename} déjà planifié")
                 else:
-                    st.error("Veuillez saisir un nouveau nom de colonne.")
+                    st.session_state.rename_list.append((col_to_rename, new_name_clean))
+                    st.success(f"✅ Ajouté: {col_to_rename} → {new_name_clean}")
+                    st.rerun()
         
-        with col_clear_btn:
-            if st.button("🗑️ Vider la liste", key="clear_rename_list"):
+        with col_clear:
+            if st.button("🗑️ Vider liste", key="clear_renames", use_container_width=True):
                 st.session_state.rename_list = []
-                st.success("Liste de renommage vidée.")
+                st.success("✅ Liste vidée")
                 st.rerun()
         
-        # Afficher la liste des renommages prévus
+        # Affichage et application des renommages
         if st.session_state.rename_list:
-            st.markdown("**Renommages prévus:**")
-            rename_df = pd.DataFrame(st.session_state.rename_list, columns=["Ancien Nom", "Nouveau Nom"])
+            st.markdown("**📋 Renommages planifiés:**")
+            rename_df = pd.DataFrame(st.session_state.rename_list, columns=["Ancien", "Nouveau"])
             st.dataframe(rename_df, use_container_width=True)
             
-            if st.button("✅ Appliquer tous les renommages", key="apply_all_renames"):
+            if st.button("✅ Appliquer tous", key="apply_renames", type="primary"):
                 try:
                     rename_dict = dict(st.session_state.rename_list)
                     valid_renames = {old: new for old, new in rename_dict.items() if old in df.columns}
@@ -461,209 +555,241 @@ with tab_cleaning:
                         else:
                             df_renamed = df.rename(columns=valid_renames)
                         
-                        # Mise à jour des états de session
+                        # Mise à jour atomique des états
                         st.session_state.df = df_renamed
-                        if 'df_raw' in st.session_state:
-                            st.session_state.df_raw = df_renamed.copy() if not is_dask_dataframe(df_renamed) else df_renamed
-                        
-                        # Recalculer les types de colonnes et mettre à jour le hash
+                        st.session_state.df_raw = df_renamed.copy() if not is_dask_dataframe(df_renamed) else df_renamed
                         st.session_state.column_types = None
                         st.session_state.rename_list = []
                         st.session_state.dataset_hash = get_dataset_hash(df_renamed)
+                        st.session_state.dashboard_cache_version += 1
                         
-                        logger.info(f"Colonnes renommées avec succès: {valid_renames}")
-                        st.success(f"✅ {len(valid_renames)} colonnes renommées avec succès!")
-                        
-                        time.sleep(0.5)
+                        logger.info(f"Columns renamed: {valid_renames}")
+                        st.success(f"✅ {len(valid_renames)} colonnes renommées!")
+                        time.sleep(0.8)
                         st.rerun()
                     else:
-                        st.warning("Aucune colonne valide à renommer.")
+                        st.warning("⚠️ Aucune colonne valide")
                         
                 except Exception as e:
-                    st.error(f"Erreur lors du renommage: {e}")
-                    logger.error(f"Erreur renommage colonnes: {e}")
+                    st.error(f"❌ Erreur renommage: {str(e)[:100]}")
+                    logger.error(f"Rename error: {e}")
 
-    # Section Suppression des colonnes
-    st.markdown("### 🗑️ Suppression des Colonnes")
+    # Section Suppression avec validation robuste
+    st.markdown("### 🗑️ Suppression")
     
     col_detect, col_info = st.columns([1, 2])
     
     with col_detect:
-        if st.button("🔍 Détecter les colonnes inutiles", key="detect_useless_btn"):
-            with st.spinner("Détection en cours..."):
+        if st.button("🔍 Détecter inutiles", key="detect_useless", use_container_width=True):
+            with st.spinner("🔍 Détection..."):
                 try:
-                    useless_candidates = detect_useless_columns(df, threshold_missing=0.6)
+                    useless_candidates = detect_useless_columns(df, threshold_missing=0.7)
                     useless_candidates = [col for col in useless_candidates if col in df.columns]
                     st.session_state.useless_candidates = useless_candidates
                     
                     if useless_candidates:
-                        st.success(f"✅ {len(useless_candidates)} colonnes inutiles détectées.")
-                        logger.info(f"Colonnes inutiles détectées: {useless_candidates}")
+                        st.success(f"✅ {len(useless_candidates)} trouvées")
                     else:
-                        st.info("Aucune colonne inutile détectée.")
+                        st.info("ℹ️ Aucune colonne inutile")
                         
                 except Exception as e:
-                    st.error(f"Erreur lors de la détection: {e}")
-                    logger.error(f"Erreur détection colonnes inutiles: {e}")
+                    st.error(f"❌ Erreur détection: {str(e)[:100]}")
+                    logger.error(f"Useless detection error: {e}")
     
     with col_info:
         if st.session_state.useless_candidates:
-            st.info(f"Colonnes détectées: {', '.join(st.session_state.useless_candidates[:5])}{'...' if len(st.session_state.useless_candidates) > 5 else ''}")
+            candidates_display = st.session_state.useless_candidates[:3]
+            display_text = ", ".join(candidates_display)
+            if len(st.session_state.useless_candidates) > 3:
+                display_text += f" ... +{len(st.session_state.useless_candidates)-3}"
+            st.info(f"🎯 Détectées: {display_text}")
     
-    # Formulaire de suppression des colonnes
-    with st.form(key="drop_columns_form"):
-        st.markdown("**Sélection des colonnes à supprimer:**")
+    # Formulaire de suppression sécurisé
+    with st.form("drop_form", clear_on_submit=False):
+        st.markdown("**Sélection pour suppression:**")
         
-        available_columns = list(df.columns)
         cols_to_drop = []
         
-        # Colonnes détectées automatiquement
+        # Colonnes détectées
         if st.session_state.useless_candidates:
             auto_cols = st.multiselect(
-                "🤖 Colonnes détectées automatiquement (recommandées)",
-                options=[col for col in st.session_state.useless_candidates if col in available_columns],
+                "🤖 Auto-détectées",
+                options=[col for col in st.session_state.useless_candidates if col in df.columns],
                 default=[],
-                key="auto_drop_selection",
+                key="auto_drop_multi",
                 help="Colonnes avec trop de valeurs manquantes ou constantes"
             )
             cols_to_drop.extend(auto_cols)
         
         # Sélection manuelle
-        remaining_cols = [col for col in available_columns if col not in cols_to_drop]
+        remaining = [col for col in df.columns if col not in cols_to_drop]
         manual_cols = st.multiselect(
-            "👤 Sélection manuelle",
-            options=remaining_cols,
+            "👤 Manuelle",
+            options=remaining,
             default=[],
-            key="manual_drop_selection",
-            help="Sélectionnez d'autres colonnes à supprimer"
+            key="manual_drop_multi"
         )
         cols_to_drop.extend(manual_cols)
         
-        # Résumé des colonnes à supprimer
+        # Récapitulatif
         if cols_to_drop:
-            st.markdown(f"**📋 Résumé: {len(cols_to_drop)} colonne(s) seront supprimées**")
-            st.write(", ".join(cols_to_drop))
+            total_cols = len(df.columns)
+            remaining_cols = total_cols - len(cols_to_drop)
             
-            if len(cols_to_drop) > len(available_columns) * 0.5:
-                st.warning("⚠️ Attention: Vous supprimez plus de la moitié des colonnes!")
+            st.markdown(f"**📋 {len(cols_to_drop)} colonnes à supprimer**")
+            if len(cols_to_drop) <= 5:
+                st.write(f"🎯 {', '.join(cols_to_drop)}")
+            else:
+                st.write(f"🎯 {', '.join(cols_to_drop[:3])} ... +{len(cols_to_drop)-3} autres")
+            
+            if remaining_cols == 0:
+                st.error("❌ Suppression de toutes les colonnes impossible!")
+            elif len(cols_to_drop) > total_cols * 0.7:
+                st.warning("⚠️ Plus de 70% des colonnes seront supprimées!")
         
-        # Boutons de soumission
+        # Boutons d'action
         col_submit, col_cancel = st.columns([1, 1])
         
         with col_submit:
             submit_drop = st.form_submit_button(
-                "🗑️ Supprimer les colonnes sélectionnées",
-                type="primary" if cols_to_drop else "secondary"
+                "🗑️ Supprimer",
+                type="primary" if cols_to_drop and len(df.columns) - len(cols_to_drop) > 0 else "secondary",
+                disabled=not cols_to_drop or len(df.columns) - len(cols_to_drop) == 0,
+                use_container_width=True
             )
         
         with col_cancel:
-            if st.form_submit_button("❌ Annuler"):
+            if st.form_submit_button("❌ Annuler", use_container_width=True):
                 st.session_state.useless_candidates = []
-                st.success("Sélection annulée.")
+                st.success("✅ Annulé")
                 st.rerun()
         
-        # Traitement de la suppression
+        # Traitement sécurisé de la suppression
         if submit_drop and cols_to_drop:
-            with st.spinner(f"Suppression de {len(cols_to_drop)} colonne(s)..."):
+            with st.spinner(f"🗑️ Suppression de {len(cols_to_drop)} colonne(s)..."):
                 try:
-                    valid_cols_to_drop = [col for col in cols_to_drop if col in df.columns]
+                    valid_cols = [col for col in cols_to_drop if col in df.columns]
                     
-                    if valid_cols_to_drop:
-                        if df.shape[1] - len(valid_cols_to_drop) == 0:
-                            st.error("❌ Impossible de supprimer toutes les colonnes!")
-                            logger.error("Tentative de suppression de toutes les colonnes")
+                    if valid_cols and len(df.columns) - len(valid_cols) > 0:
+                        # Suppression effective
+                        if is_dask_dataframe(df):
+                            df_cleaned = df.drop(columns=valid_cols).persist()
                         else:
-                            # Effectuer la suppression
-                            if is_dask_dataframe(df):
-                                df_cleaned = df.drop(columns=valid_cols_to_drop).persist()
-                            else:
-                                df_cleaned = df.drop(columns=valid_cols_to_drop)
-                            
-                            # Mise à jour des états de session
-                            st.session_state.df = df_cleaned
-                            if 'df_raw' in st.session_state:
-                                st.session_state.df_raw = df_cleaned.copy() if not is_dask_dataframe(df_cleaned) else df_cleaned
-                            
-                            # Réinitialiser les états liés aux colonnes
-                            st.session_state.column_types = None
-                            st.session_state.useless_candidates = []
-                            st.session_state.columns_to_drop = []
-                            st.session_state.dataset_hash = get_dataset_hash(df_cleaned)
-                            
-                            logger.info(f"Colonnes supprimées avec succès: {valid_cols_to_drop}")
-                            st.success(f"✅ {len(valid_cols_to_drop)} colonne(s) supprimée(s) avec succès!")
-                            st.info(f"📊 Colonnes restantes: {', '.join(list(df_cleaned.columns)[:10])}{'...' if len(df_cleaned.columns) > 10 else ''}")
-                            
-                            time.sleep(0.5)
-                            st.rerun()
+                            df_cleaned = df.drop(columns=valid_cols)
+                        
+                        # Mise à jour atomique des états
+                        st.session_state.df = df_cleaned
+                        st.session_state.df_raw = df_cleaned.copy() if not is_dask_dataframe(df_cleaned) else df_cleaned
+                        st.session_state.column_types = None
+                        st.session_state.useless_candidates = []
+                        st.session_state.columns_to_drop = []
+                        st.session_state.dataset_hash = get_dataset_hash(df_cleaned)
+                        st.session_state.dashboard_cache_version += 1
+                        
+                        logger.info(f"Columns dropped successfully: {valid_cols}")
+                        st.success(f"✅ {len(valid_cols)} colonne(s) supprimée(s)!")
+                        
+                        remaining_cols = list(df_cleaned.columns)
+                        if len(remaining_cols) <= 8:
+                            st.info(f"📊 Colonnes restantes: {', '.join(remaining_cols)}")
+                        else:
+                            st.info(f"📊 {len(remaining_cols)} colonnes restantes: {', '.join(remaining_cols[:5])} ... +{len(remaining_cols)-5} autres")
+                        
+                        time.sleep(1)
+                        st.rerun()
                     else:
-                        st.warning("⚠️ Aucune colonne valide à supprimer.")
+                        st.warning("⚠️ Aucune colonne valide à supprimer")
                         
                 except Exception as e:
-                    st.error(f"❌ Erreur lors de la suppression: {e}")
-                    logger.error(f"Erreur suppression colonnes: {e}")
-        
-        elif submit_drop and not cols_to_drop:
-            st.warning("⚠️ Aucune colonne sélectionnée pour la suppression.")
+                    st.error(f"❌ Erreur suppression: {str(e)[:100]}")
+                    logger.error(f"Drop columns error: {e}")
 
-# Footer avec monitoring système
+# Footer avec monitoring système discret mais informatif
 st.markdown("---")
-col_footer1, col_footer2, col_footer3, col_footer4 = st.columns(4)
+footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
 
-with col_footer1:
+with footer_col1:
     n_rows = len(df) if not is_dask_dataframe(df) else "Dask"
-    st.caption(f"📊 Dataset: {n_rows:,} lignes × {df.shape[1]} colonnes" if isinstance(n_rows, int) else f"📊 Dataset: {n_rows} × {df.shape[1]} colonnes")
+    if isinstance(n_rows, int):
+        st.caption(f"📊 {n_rows:,} × {df.shape[1]} colonnes")
+    else:
+        st.caption(f"📊 {n_rows} × {df.shape[1]} colonnes")
 
-with col_footer2:
+with footer_col2:
     if not is_dask_dataframe(df):
         try:
             memory_mb = df.memory_usage(deep=True).sum() / (1024**2)
-            st.caption(f"💾 Mémoire: {memory_mb:.1f} MB")
+            st.caption(f"💾 {memory_mb:.1f} MB")
         except:
-            st.caption("💾 Mémoire: N/A")
+            st.caption("💾 N/A")
     else:
-        st.caption(f"💾 Partitions Dask: {df.npartitions}")
+        st.caption(f"💾 {df.npartitions} partitions")
 
-with col_footer3:
+with footer_col3:
     try:
-        system_memory = psutil.virtual_memory().percent
-        color = "🔴" if system_memory > 85 else "🟡" if system_memory > 70 else "🟢"
-        st.caption(f"{color} RAM système: {system_memory:.0f}%")
+        sys_mem = psutil.virtual_memory().percent
+        color = "🔴" if sys_mem > 85 else "🟡" if sys_mem > 70 else "🟢"
+        st.caption(f"{color} RAM: {sys_mem:.0f}%")
     except:
         st.caption("🔧 RAM: N/A")
 
-with col_footer4:
-    st.caption(f"⏱️ Session: {time.strftime('%H:%M:%S')}")
+with footer_col4:
+    st.caption(f"⏰ {time.strftime('%H:%M:%S')}")
 
-# Bouton d'urgence pour réinitialisation complète
-if st.button("🔄 Réinitialiser le dashboard", help="Efface le cache et recharge", key="emergency_reset"):
-    try:
-        st.cache_data.clear()
-        cleanup_memory()
-        for key in ['column_types', 'useless_candidates', 'rename_list', 'columns_to_drop']:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.success("Dashboard réinitialisé!")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Erreur lors de la réinitialisation: {e}")
-        logger.error(f"Reset error: {e}")
+# Actions d'urgence et debug
+action_col1, action_col2 = st.columns(2)
 
-# Mode debug (seulement si activé)
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-if DEBUG_MODE:
-    with st.expander("🔧 Mode débogage", expanded=False):
-        st.write(f"**Hash du dataset:** {st.session_state.dataset_hash}")
-        st.write(f"**Nombre de colonnes:** {df.shape[1]}")
-        st.write(f"**Type de DataFrame:** {'Dask' if is_dask_dataframe(df) else 'Pandas'}")
-        st.write(f"**Types de colonnes:** {st.session_state.column_types}")
-        if is_dask_dataframe(df):
-            st.write(f"**Partitions Dask:** {df.npartitions}")
-        
-        # Métriques système détaillées
+with action_col1:
+    if st.button("🔄 Reset Dashboard", help="Réinitialise le cache et l'état", key="emergency_reset"):
         try:
-            memory_info = psutil.virtual_memory()
-            st.write(f"**Mémoire disponible:** {memory_info.available / (1024**3):.1f} GB")
-            st.write(f"**CPU usage:** {psutil.cpu_percent()}%")
+            # Nettoyage sélectif pour éviter les problèmes
+            keys_to_clear = ['column_types', 'useless_candidates', 'rename_list', 'columns_to_drop']
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    del st.session_state[key]
+            
+            st.cache_data.clear()
+            cleanup_memory()
+            st.session_state.dashboard_cache_version += 1
+            
+            st.success("✅ Dashboard réinitialisé")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Erreur reset: {e}")
+
+with action_col2:
+    # Debug conditionnel basé sur variable d'environnement
+    debug_mode = os.getenv("DEBUG_MODE", "false").lower() == "true"
+    if debug_mode and st.button("🔧 Debug Info", help="Informations de débogage"):
+        with st.expander("🔍 Informations de débogage", expanded=True):
+            st.json({
+                "dataset_hash": st.session_state.dataset_hash,
+                "cache_version": st.session_state.dashboard_cache_version,
+                "columns_count": len(df.columns),
+                "dataframe_type": "Dask" if is_dask_dataframe(df) else "Pandas",
+                "column_types_available": st.session_state.column_types is not None,
+                "system_memory_percent": get_system_metrics()['memory_percent']
+            })
+
+# Surveillance continue des performances (non-bloquante)
+if hasattr(st.session_state, 'last_perf_check'):
+    if time.time() - st.session_state.last_perf_check > 300:  # 5 minutes
+        try:
+            memory_usage = psutil.virtual_memory().percent
+            if memory_usage > 90:
+                st.error("🚨 Mémoire critique! Redémarrage recommandé.")
         except:
-            st.write("**Métriques système:** Non disponibles")
+            pass
+        st.session_state.last_perf_check = time.time()
+else:
+    st.session_state.last_perf_check = time.time()
+
+def get_system_metrics():
+    """Métriques système pour le monitoring"""
+    try:
+        return {
+            'memory_percent': psutil.virtual_memory().percent,
+            'timestamp': time.time()
+        }
+    except:
+        return {'memory_percent': 0, 'timestamp': time.time()}
