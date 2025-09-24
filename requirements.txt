@@ -19,3 +19,4 @@ ydata-profiling
 pandera
 matplotlib
 reportlab
+catboost

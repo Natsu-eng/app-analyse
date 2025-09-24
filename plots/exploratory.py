@@ -43,6 +43,10 @@ def plot_overview_metrics(profile: dict):
 def plot_missing_values_overview(_df: pd.DataFrame):
     """Crée un graphique à barres du nombre de valeurs manquantes par colonne."""
     try:
+        if _df.empty or not _df.columns.tolist():
+            logger.info("Aucun DataFrame ou colonnes disponibles pour le graphique des valeurs manquantes.")
+            return None
+            
         missing = _df.isnull().sum()
         missing = missing[missing > 0].sort_values(ascending=False)
         
@@ -62,9 +66,9 @@ def plot_missing_values_overview(_df: pd.DataFrame):
 def plot_cardinality_overview(_df: pd.DataFrame, column_types: dict):
     """Crée un graphique à barres de la cardinalité pour les variables catégoriques et textuelles."""
     try:
-        cat_text_cols = column_types['categorical'] + column_types['text']
+        cat_text_cols = [col for col in (column_types.get('categorical', []) + column_types.get('text', [])) if col in _df.columns]
         if not cat_text_cols:
-            logger.info("Aucune colonne catégorique ou textuelle pour le graphique de cardinalité.")
+            logger.info("Aucune colonne catégorique ou textuelle valide pour le graphique de cardinalité.")
             return None
             
         cardinality = _df[cat_text_cols].nunique().sort_values(ascending=False)
@@ -80,6 +84,11 @@ def plot_cardinality_overview(_df: pd.DataFrame, column_types: dict):
 def plot_distribution(series: pd.Series, name: str):
     """Crée un histogramme et un box plot pour une variable numérique."""
     try:
+        # Vérifier si la série est vide ou ne contient que des NaN
+        if series.empty or series.isna().all():
+            logger.info(f"Aucune donnée valide pour la distribution de {name} (série vide ou toutes valeurs NaN).")
+            return None
+            
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                             row_heights=[0.8, 0.2])
         
@@ -101,6 +110,10 @@ def plot_distribution(series: pd.Series, name: str):
 def plot_bivariate_analysis(df: pd.DataFrame, col1: str, col2: str, type1: str, type2: str):
     """Génère le graphique approprié pour une analyse bivariée."""
     try:
+        if col1 not in df.columns or col2 not in df.columns:
+            logger.warning(f"Une ou plusieurs colonnes ({col1}, {col2}) ne sont pas dans le DataFrame.")
+            return None
+            
         title = f"{col1} vs. {col2}"
         if type1 == 'numeric' and type2 == 'numeric':
             fig = px.scatter(df, x=col1, y=col2, title=title, trendline="ols", trendline_color_override="red")
@@ -128,10 +141,8 @@ def calculate_cramer_v(x: pd.Series, y: pd.Series):
     Calcule le coefficient de Cramer V pour deux variables catégoriques.
     """
     try:
-        # Convertir en catégorie pour optimiser la mémoire
         x = x.astype('category')
         y = y.astype('category')
-        # Vérifier le nombre de catégories uniques
         max_categories = 100
         if x.nunique() > max_categories or y.nunique() > max_categories:
             logger.warning(f"Nombre de catégories élevées ({x.nunique()} vs {y.nunique()}) pour {x.name} vs {y.name}. Saut du calcul.")
@@ -160,10 +171,10 @@ def calculate_anova_score(df: pd.DataFrame, numeric_col: str, categorical_col: s
             return 0.0
         start_time = time.time()
         groups = [df[numeric_col][df[categorical_col] == cat] for cat in df[categorical_col].unique()]
-        groups = [g for g in groups if len(g) > 1]  # Ignorer les groupes avec moins de 2 observations
+        groups = [g for g in groups if len(g) > 1]
         if len(groups) > 1:
             f_stat, _ = f_oneway(*groups)
-            result = min(f_stat / (f_stat + 1), 1.0)  # Normaliser entre 0 et 1
+            result = min(f_stat / (f_stat + 1), 1.0)
             logger.debug(f"ANOVA pour {numeric_col} vs {categorical_col} calculé en {time.time() - start_time:.2f} secondes : {result:.2f}")
             return result
         logger.debug(f"ANOVA pour {numeric_col} vs {categorical_col} ignoré : pas assez de groupes valides.")
@@ -176,32 +187,20 @@ def calculate_anova_score(df: pd.DataFrame, numeric_col: str, categorical_col: s
 def plot_correlation_heatmap(df: pd.DataFrame, target_column: str = None, task_type: str = "classification", timeout: int = 30):
     """
     Crée un heatmap interactif des corrélations pour un dataset supervisé ou non supervisé.
-    
-    Args:
-        df (pd.DataFrame): Le DataFrame contenant les données.
-        target_column (str): Le nom de la colonne cible (optionnel pour non supervisé).
-        task_type (str): Type de tâche ("classification", "regression", "unsupervised").
-        timeout (int): Temps maximum (en secondes) pour le calcul.
-    
-    Returns:
-        plotly.graph_objects.Figure: Le heatmap des corrélations, ou None si erreur ou timeout.
     """
     start_time = time.time()
     try:
         df = df.copy()
         
-        # Identifier les colonnes numériques et catégoriques
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         
-        # Exclure les colonnes inutiles (identifiants ou cardinalité élevée)
         cols_to_exclude = [col for col in df.columns if col.lower() in ['product id', 'id'] or df[col].nunique() > 100 or df[col].nunique() == len(df)]
         if cols_to_exclude:
             logger.info(f"Colonnes exclues du heatmap (identifiants ou cardinalité élevée) : {cols_to_exclude}")
             numeric_cols = [col for col in numeric_cols if col not in cols_to_exclude]
             categorical_cols = [col for col in categorical_cols if col not in cols_to_exclude]
         
-        # Si target_column est fourni, l'ajouter aux colonnes à analyser
         if target_column and target_column in df.columns:
             if target_column in categorical_cols:
                 df[target_column] = pd.Categorical(df[target_column]).codes
@@ -217,17 +216,15 @@ def plot_correlation_heatmap(df: pd.DataFrame, target_column: str = None, task_t
             logger.error("Aucune colonne à analyser pour le heatmap.")
             return None
 
-        # Initialiser la matrice de corrélation
         corr_matrix = pd.DataFrame(np.zeros((len(cols_to_analyze), len(cols_to_analyze))),
                                   index=cols_to_analyze, columns=cols_to_analyze)
 
-        # Calculer les corrélations avec vérification du timeout
         for i, col1 in enumerate(cols_to_analyze):
             for j, col2 in enumerate(cols_to_analyze):
                 if time.time() - start_time > timeout:
                     logger.error(f"Timeout atteint ({timeout} secondes) lors du calcul des corrélations.")
                     return None
-                if i > j:  # Remplir seulement la moitié inférieure
+                if i > j:
                     continue
                 logger.debug(f"Calcul de la corrélation entre {col1} et {col2}")
                 if col1 == col2:
@@ -242,7 +239,6 @@ def plot_correlation_heatmap(df: pd.DataFrame, target_column: str = None, task_t
                     corr_matrix.loc[col1, col2] = calculate_cramer_v(df[col1], df[col2])
                 corr_matrix.loc[col2, col1] = corr_matrix.loc[col1, col2]
 
-        # Créer le heatmap
         fig = go.Figure(data=go.Heatmap(
             z=corr_matrix.values,
             x=corr_matrix.columns,
@@ -269,7 +265,6 @@ def plot_correlation_heatmap(df: pd.DataFrame, target_column: str = None, task_t
 
         logger.info(f"Heatmap des corrélations généré avec succès en {time.time() - start_time:.2f} secondes.")
         return fig
-
     except Exception as e:
         logger.error(f"Erreur lors de la génération du heatmap : {str(e)}")
         return None
