@@ -8,8 +8,7 @@ from sklearn.preprocessing import (
     StandardScaler, RobustScaler, MinMaxScaler, 
     OneHotEncoder, OrdinalEncoder, LabelEncoder
 )
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, Any
 import warnings
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.exceptions import ConvergenceWarning
@@ -190,19 +189,11 @@ def safe_label_encode(y: pd.Series) -> tuple:
         y_encoded = y.map(reverse_map).values
         return y_encoded, None, encoding_map
 
-def create_preprocessor(preprocessing_config: Dict, column_types: Dict = None) -> Pipeline:
+def create_preprocessor(preprocessing_config: Dict, column_types: Dict = None):
     """
-    Crée un pipeline de prétraitement robuste et adaptable.
-    
-    Args:
-        preprocessing_config: Configuration du prétraitement
-        column_types: Types de colonnes détectés
-    
-    Returns:
-        Pipeline de prétraitement
+        Preprocessor (ColumnTransformer) compatible avec imblearn.Pipeline.
     """
     try:
-        # Configuration par défaut
         default_config = {
             'numeric_imputation': 'mean',
             'categorical_imputation': 'most_frequent',
@@ -212,97 +203,77 @@ def create_preprocessor(preprocessing_config: Dict, column_types: Dict = None) -
             'scaling_method': 'standard',
             'encoding_method': 'onehot'
         }
-        
         config = {**default_config, **preprocessing_config}
-        
-        # Étape 1: Nettoyage des colonnes
-        column_cleaner = SafeColumnCleaner(config)
-        
-        # Étape 2: Imputation intelligente
-        imputer = SmartImputer(
-            numeric_strategy=config['numeric_imputation'],
-            categorical_strategy=config['categorical_imputation']
-        )
-        
-        # Étape 3: Scaling et encoding (via ColumnTransformer)
+
         numeric_features = column_types.get('numeric', []) if column_types else []
         categorical_features = column_types.get('categorical', []) if column_types else []
         text_features = column_types.get('text_or_high_cardinality', []) if column_types else []
-        
-        # Sélection du scaler numérique
+
+        # Choix du scaler
         if config['scaling_method'] == 'robust':
             numeric_scaler = RobustScaler()
         elif config['scaling_method'] == 'minmax':
             numeric_scaler = MinMaxScaler()
         else:
             numeric_scaler = StandardScaler()
-        
-        # Sélection de l'encodeur catégoriel
+
+        # Choix de l’encodeur
         if config['encoding_method'] == 'ordinal':
             categorical_encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
         else:
             categorical_encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
-        
-        # Transformers pour chaque type de données
+
         transformers = []
-        
+
         if numeric_features:
-            numeric_transformer = Pipeline(steps=[
-                ('imputer', SimpleImputer(strategy=config['numeric_imputation'])),
-                ('scaler', numeric_scaler)
-            ])
-            transformers.append(('num', numeric_transformer, numeric_features))
-        
+            transformers.append((
+                'num',
+                Pipeline([
+                    ('imputer', SimpleImputer(strategy=config['numeric_imputation'])),
+                    ('scaler', numeric_scaler)
+                ]),
+                numeric_features
+            ))
+
         if categorical_features:
-            categorical_transformer = Pipeline(steps=[
-                ('imputer', SimpleImputer(strategy=config['categorical_imputation'])),
-                ('encoder', categorical_encoder)
-            ])
-            transformers.append(('cat', categorical_transformer, categorical_features))
-        
-        # Pour les colonnes texte/haute cardinalité, traitement spécifique
+            transformers.append((
+                'cat',
+                Pipeline([
+                    ('imputer', SimpleImputer(strategy=config['categorical_imputation'])),
+                    ('encoder', categorical_encoder)
+                ]),
+                categorical_features
+            ))
+
         if text_features:
-            text_transformer = Pipeline(steps=[
-                ('imputer', SimpleImputer(strategy=config['categorical_imputation'], fill_value='missing')),
-                ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
-            ])
-            transformers.append(('text', text_transformer, text_features))
-        
-        # ColumnTransformer principal
-        if transformers:
-            column_transformer = ColumnTransformer(
-                transformers=transformers,
-                remainder='passthrough',  # Conserver les autres colonnes
-                n_jobs=1  # Éviter le parallélisme pour la stabilité
-            )
-        else:
-            # Fallback si aucun transformer n'est défini
-            column_transformer = ColumnTransformer(
-                transformers=[('passthrough', 'passthrough', make_column_selector(dtype_include=np.number))],
-                remainder='passthrough'
-            )
-        
-        # Pipeline complète
-        preprocessor_pipeline = Pipeline(steps=[
-            ('cleaner', column_cleaner),
-            ('imputer', imputer),
-            ('transformer', column_transformer)
-        ])
-        
-        logger.info("✅ Pipeline de prétraitement créée avec succès")
-        return preprocessor_pipeline
-        
+            transformers.append((
+                'text',
+                Pipeline([
+                    ('imputer', SimpleImputer(strategy=config['categorical_imputation'], fill_value='missing')),
+                    ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+                ]),
+                text_features
+            ))
+
+        # ✅ Retourne un ColumnTransformer directement
+        column_transformer = ColumnTransformer(
+            transformers=transformers,
+            remainder='drop',
+            n_jobs=1
+        )
+
+        logger.info("✅ Preprocessor ColumnTransformer créé avec succès")
+        return column_transformer
+
     except Exception as e:
         logger.error(f"❌ Erreur création préprocesseur: {e}")
-        
-        # Fallback: pipeline minimale
-        fallback_pipeline = Pipeline(steps=[
-            ('simple_imputer', SimpleImputer(strategy='constant', fill_value=0)),
-            ('scaler', StandardScaler())
-        ])
-        
-        logger.info("🔄 Utilisation du pipeline de fallback")
-        return fallback_pipeline
+        # fallback simple
+        return ColumnTransformer([
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='constant', fill_value=0)),
+                ('scaler', StandardScaler())
+            ]), make_column_selector(dtype_include=np.number))
+        ], remainder='drop')
 
 def validate_preprocessor(preprocessor: Pipeline, X_sample: pd.DataFrame) -> Dict[str, Any]:
     """

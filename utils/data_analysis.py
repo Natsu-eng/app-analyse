@@ -849,100 +849,62 @@ def get_relevant_features(
 def detect_useless_columns(
     df: Union[pd.DataFrame, dd.DataFrame],
     threshold_missing: float = 0.6,
+    min_unique_ratio: float = 0.0001,   # variabilité minimale acceptée
     max_sample_size: int = 50000
 ) -> List[str]:
     """
-    Détecte les colonnes inutiles (trop de valeurs manquantes ou constantes).
-    Version robuste avec gestion d'erreurs améliorée.
-    
-    Args:
-        df: DataFrame Pandas ou Dask
-        threshold_missing: Seuil pour les valeurs manquantes (0 à 1)
-        max_sample_size: Taille maximale de l'échantillon
-    
-    Returns:
-        Liste des colonnes inutiles
+    Détecte les colonnes inutiles :
+    - Trop de valeurs manquantes
+    - Constantes ou quasi-constantes
+    Optimisé pour production.
     """
     try:
         if df.empty or len(df.columns) == 0:
             logger.warning("DataFrame is empty or has no columns")
             return []
 
-        useless_columns = []
-        
-        # Échantillonnage sécurisé
-        sample_df = safe_sample(df, sample_frac=0.02, max_rows=max_sample_size, min_rows=100)
-        
+        # --- Échantillonnage unique ---
+        sample_df = safe_sample(df, sample_frac=0.05, max_rows=max_sample_size, min_rows=200)
         if sample_df.empty:
-            logger.warning("Sample DataFrame is empty")
             return []
 
-        total_columns = len(sample_df.columns)
-        logger.info(f"Analyzing {total_columns} columns for uselessness")
+        useless_columns = []
 
-        # Analyse colonne par colonne avec gestion d'erreurs robuste
-        for i, col in enumerate(sample_df.columns, 1):
-            try:
-                # Logging du progrès
-                if total_columns > 20 and i % 10 == 0:
-                    logger.debug(f"Useless column detection progress: {i}/{total_columns}")
-                
-                col_data = sample_df[col]
-                
-                # Test 1: Valeurs manquantes excessives
-                try:
-                    missing_ratio = col_data.isna().mean()
-                    if missing_ratio > threshold_missing:
-                        useless_columns.append(col)
-                        logger.debug(f"Column {col} marked useless: {missing_ratio:.1%} missing values")
-                        continue
-                except Exception as e:
-                    logger.debug(f"Missing value analysis failed for {col}: {e}")
-                
-                # Test 2: Valeurs constantes
-                try:
-                    non_null_values = col_data.dropna()
-                    if len(non_null_values) > 0:
-                        unique_count = non_null_values.nunique()
-                        if unique_count <= 1:
-                            useless_columns.append(col)
-                            logger.debug(f"Column {col} marked useless: constant values")
-                            continue
-                except Exception as e:
-                    logger.debug(f"Constant value analysis failed for {col}: {e}")
-                
-                # Test 3: Colonnes avec très peu de variabilité (optionnel)
-                try:
-                    if pd.api.types.is_numeric_dtype(col_data):
-                        non_null_numeric = col_data.dropna()
-                        if len(non_null_numeric) > 1:
-                            std_dev = non_null_numeric.std()
-                            mean_val = non_null_numeric.mean()
-                            if std_dev == 0 or (mean_val != 0 and abs(std_dev / mean_val) < 1e-10):
-                                useless_columns.append(col)
-                                logger.debug(f"Column {col} marked useless: no variability")
-                                continue
-                except Exception as e:
-                    logger.debug(f"Variability analysis failed for {col}: {e}")
-                    
-            except Exception as e:
-                logger.warning(f"Complete analysis failed for column {col}: {e}")
-                continue
+        # --- 1. Colonnes avec trop de NaN ---
+        try:
+            missing_ratios = sample_df.isna().mean()
+            high_missing = missing_ratios[missing_ratios > threshold_missing].index.tolist()
+            useless_columns.extend(high_missing)
+        except Exception as e:
+            logger.warning(f"Missing ratio check failed: {e}")
 
-        # Suppression des doublons et validation finale
+        # --- 2. Colonnes constantes ou quasi-constantes ---
+        try:
+            nunique_counts = sample_df.nunique(dropna=True)
+            constant_cols = nunique_counts[nunique_counts <= 1].index.tolist()
+            useless_columns.extend(constant_cols)
+        except Exception as e:
+            logger.warning(f"Constant value check failed: {e}")
+
+        # --- 3. Colonnes numériques avec variance quasi nulle ---
+        try:
+            numeric_cols = sample_df.select_dtypes(include=np.number).columns
+            if len(numeric_cols) > 0:
+                desc = sample_df[numeric_cols].describe().T  # mean, std dispo
+                low_var_cols = desc.index[
+                    (desc["std"].fillna(0) == 0) |
+                    ((desc["mean"].replace(0, np.nan)).notna() &
+                     (abs(desc["std"] / desc["mean"].replace(0, np.nan)) < min_unique_ratio))
+                ].tolist()
+                useless_columns.extend(low_var_cols)
+        except Exception as e:
+            logger.warning(f"Low variance check failed: {e}")
+
+        # Nettoyage final
         useless_columns = list(set(useless_columns))
-        
-        # Vérifier que les colonnes existent encore dans le DataFrame original
         valid_useless_columns = [col for col in useless_columns if col in df.columns]
-        
-        if len(valid_useless_columns) != len(useless_columns):
-            logger.warning(f"Some useless columns not found in original DataFrame")
 
-        # Nettoyage mémoire
-        del sample_df
-        gc.collect()
-
-        logger.info(f"Useless column detection completed: {len(valid_useless_columns)} columns marked as useless")
+        logger.info(f"Useless column detection completed: {len(valid_useless_columns)} columns")
         return valid_useless_columns
 
     except Exception as e:

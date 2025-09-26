@@ -21,3 +21,4 @@ matplotlib==3.8.3
 reportlab==4.1.0
 catboost==1.2.5
 psutil==5.9.8
+imblearn==1.15.3

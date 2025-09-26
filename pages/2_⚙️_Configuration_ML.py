@@ -1,11 +1,9 @@
 import streamlit as st
 import pandas as pd
-import logging
 import time
 import psutil
-import gc
 import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from functools import wraps
 
 # Imports des modules ML
@@ -54,6 +52,129 @@ def monitor_ml_operation(func):
             raise
     return wrapper
 
+# NOUVELLE FONCTION : Validation des features pour clustering
+def validate_clustering_features(df: pd.DataFrame, features: List[str]) -> Dict[str, Any]:
+    """Valide que les features sont adaptées au clustering"""
+    validation = {
+        "is_valid": True,
+        "issues": [],
+        "warnings": [],
+        "valid_features": []
+    }
+    
+    try:
+        for feature in features:
+            if feature not in df.columns:
+                validation["issues"].append(f"Colonne '{feature}' non trouvée")
+                continue
+                
+            # Vérifier si constante
+            if df[feature].std() == 0:
+                validation["warnings"].append(f"'{feature}' est constante")
+                continue
+                
+            # Vérifier valeurs manquantes
+            missing_ratio = df[feature].isnull().mean()
+            if missing_ratio > 0.5:
+                validation["warnings"].append(f"'{feature}' a {missing_ratio:.1%} de valeurs manquantes")
+                continue
+                
+            # Vérifier variance acceptable
+            if df[feature].nunique() == 1:
+                validation["warnings"].append(f"'{feature}' n'a qu'une seule valeur unique")
+                continue
+                
+            validation["valid_features"].append(feature)
+        
+        validation["is_valid"] = len(validation["valid_features"]) >= 2
+        
+    except Exception as e:
+        validation["is_valid"] = False
+        validation["issues"].append(f"Erreur validation: {str(e)}")
+    
+    return validation
+
+# NOUVELLE FONCTION : Estimation temps plus précise
+def estimate_training_time(df: pd.DataFrame, n_models: int, task_type: str, 
+                          optimize_hp: bool, n_features: int, use_smote: bool = False) -> int:
+    """Estime le temps d'entraînement de façon plus réaliste"""
+    try:
+        n_samples = len(df)
+        
+        # Complexité de base basée sur taille données
+        base_complexity = (n_samples * n_features) / 1000
+        
+        # Multiplicateurs selon les paramètres
+        time_multipliers = {
+            'unsupervised': 1.2,
+            'classification': 1.5 if use_smote else 1.3,
+            'regression': 1.4
+        }
+        
+        if optimize_hp:
+            time_multipliers = {k: v * 3.5 for k, v in time_multipliers.items()}
+        
+        time_multiplier = time_multipliers.get(task_type, 1.5)
+        
+        # Estimation en secondes
+        estimated_seconds = base_complexity * n_models * time_multiplier
+        
+        # Bornes raisonnables
+        min_seconds = 30  # Minimum 30 secondes
+        max_seconds = 3600  # Maximum 1 heure
+        
+        estimated_seconds = max(min_seconds, min(estimated_seconds, max_seconds))
+        
+        return int(estimated_seconds)
+        
+    except Exception as e:
+        logger.warning(f"Erreur estimation temps: {e}")
+        return 60  # Valeur par défaut
+
+# NOUVELLE FONCTION : Vérification ressources système
+def check_system_resources(df: pd.DataFrame, n_models: int) -> Dict[str, Any]:
+    """Vérifie si le système a assez de ressources pour l'entraînement"""
+    check_result = {
+        "has_enough_resources": True,
+        "issues": [],
+        "warnings": [],
+        "available_memory_mb": 0,
+        "estimated_needed_mb": 0
+    }
+    
+    try:
+        # Estimation mémoire nécessaire
+        df_memory = df.memory_usage(deep=True).sum() / (1024**2)
+        estimated_needed = df_memory * n_models * 3  # Buffer 3x
+        
+        # Mémoire disponible
+        available_memory = psutil.virtual_memory().available / (1024**2)
+        
+        check_result["available_memory_mb"] = available_memory
+        check_result["estimated_needed_mb"] = estimated_needed
+        
+        # Vérifications
+        if estimated_needed > available_memory:
+            check_result["has_enough_resources"] = False
+            check_result["issues"].append(
+                f"Mémoire insuffisante (nécessaire: {estimated_needed:.0f}MB, disponible: {available_memory:.0f}MB)"
+            )
+        elif estimated_needed > available_memory * 0.7:
+            check_result["warnings"].append(
+                f"Mémoire limite (nécessaire: {estimated_needed:.0f}MB, disponible: {available_memory:.0f}MB)"
+            )
+        
+        # Vérification CPU
+        cpu_percent = psutil.cpu_percent(interval=1)
+        if cpu_percent > 90:
+            check_result["warnings"].append(f"CPU élevé: {cpu_percent:.1f}%")
+            
+    except Exception as e:
+        logger.warning(f"Erreur vérification ressources: {e}")
+        check_result["warnings"].append("Impossible de vérifier les ressources système")
+    
+    return check_result
+
 # Validation sécurisée du DataFrame
 @st.cache_data(ttl=300, max_entries=3)
 def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
@@ -62,7 +183,7 @@ def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
         "is_valid": True,
         "issues": [],
         "warnings": [],
-        "min_rows_required": 50,  # Réduit pour plus de flexibilité
+        "min_rows_required": 50,
         "min_cols_required": 2,
         "stats": {}
     }
@@ -124,7 +245,7 @@ def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
     
     return validation
 
-# Initialisation robuste de l'état ML
+# Initialisation robuste de l'état ML - AMÉLIORÉE
 def initialize_ml_config_state():
     """Initialise l'état de configuration ML de façon robuste"""
     defaults = {
@@ -146,7 +267,8 @@ def initialize_ml_config_state():
         'ml_last_training_time': None,
         'ml_error_count': 0,
         'ml_session_id': int(time.time()),
-        'current_step': 1
+        'current_step': 1,
+        'previous_task_type': None  # NOUVEAU : pour détection changement
     }
     
     for key, default_value in defaults.items():
@@ -155,10 +277,18 @@ def initialize_ml_config_state():
 
 @monitor_ml_operation
 def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
-    """Version sécurisée de la détection du type de tâche"""
+    """Version sécurisée de la détection du type de tâche - AMÉLIORÉE"""
     try:
         if not target_column or target_column not in df.columns:
             return {"task_type": "unknown", "n_classes": 0, "error": "Colonne cible invalide"}
+        
+        # Vérifier si c'est un identifiant (valeurs uniques)
+        if df[target_column].nunique() == len(df):
+            return {
+                "task_type": "unknown", 
+                "n_classes": df[target_column].nunique(),
+                "error": "Variable cible a des valeurs uniques pour chaque ligne (probable identifiant)"
+            }
         
         # Appel sécurisé à get_target_and_task
         result_dict = get_target_and_task(df, target_column)
@@ -174,6 +304,12 @@ def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
         try:
             if task_type == "classification":
                 n_classes = df[target_column].nunique()
+                if n_classes > 100:
+                    return {
+                        "task_type": "unknown",
+                        "n_classes": n_classes,
+                        "error": f"Trop de classes ({n_classes}) pour une classification standard"
+                    }
         except Exception as e:
             logger.debug(f"Class count calculation failed: {e}")
         
@@ -329,7 +465,27 @@ if st.session_state.current_step == 1:
     }
     
     selected_task_type = task_mapping[task_selection]
-    st.session_state.task_type = selected_task_type
+    
+    # NOUVEAU : Reset automatique quand le type de tâche change
+    if st.session_state.previous_task_type != selected_task_type:
+        st.info("🔄 Type de tâche modifié - réinitialisation des sélections...")
+        
+        # Reset des configurations qui ne sont plus valides
+        if selected_task_type == 'unsupervised':
+            st.session_state.target_column_for_ml_config = None
+            st.session_state.preprocessing_choices['use_smote'] = False
+            # Reset features pour clustering
+            st.session_state.feature_list_for_ml_config = []
+        elif selected_task_type in ['classification', 'regression']:
+            # Reset des sélections inappropriées
+            if st.session_state.target_column_for_ml_config and st.session_state.target_column_for_ml_config not in df.columns:
+                st.session_state.target_column_for_ml_config = None
+        
+        st.session_state.previous_task_type = selected_task_type
+        st.session_state.task_type = selected_task_type
+        st.rerun()
+    else:
+        st.session_state.task_type = selected_task_type
     
     # Configuration spécifique selon le type de tâche
     if selected_task_type in ['classification', 'regression']:
@@ -509,7 +665,15 @@ if st.session_state.current_step == 1:
             )
             
             if auto_cluster_features:
-                st.session_state.feature_list_for_ml_config = all_numeric_features[:20]  # Limite raisonnable
+                # NOUVEAU : Validation des features pour clustering
+                validation_result = validate_clustering_features(df, all_numeric_features[:20])
+                st.session_state.feature_list_for_ml_config = validation_result["valid_features"]
+                
+                if validation_result["warnings"]:
+                    with st.expander("⚠️ Avertissements clustering", expanded=True):
+                        for warning in validation_result["warnings"]:
+                            st.warning(f"• {warning}")
+                
                 st.success(f"✅ {len(st.session_state.feature_list_for_ml_config)} variables numériques sélectionnées")
             else:
                 # Sélection manuelle
@@ -520,7 +684,18 @@ if st.session_state.current_step == 1:
                     key="clustering_features_selector",
                     help="Variables numériques utilisées pour identifier les patterns et clusters"
                 )
-                st.session_state.feature_list_for_ml_config = clustering_features
+                
+                # Validation des features sélectionnées
+                if clustering_features:
+                    validation_result = validate_clustering_features(df, clustering_features)
+                    st.session_state.feature_list_for_ml_config = validation_result["valid_features"]
+                    
+                    if validation_result["warnings"]:
+                        with st.expander("⚠️ Avertissements clustering", expanded=True):
+                            for warning in validation_result["warnings"]:
+                                st.warning(f"• {warning}")
+                else:
+                    st.session_state.feature_list_for_ml_config = clustering_features
             
             if st.session_state.feature_list_for_ml_config:
                 st.success(f"✅ {len(st.session_state.feature_list_for_ml_config)} variables sélectionnées pour le clustering")
@@ -793,18 +968,30 @@ elif st.session_state.current_step == 3:
                 )
             st.session_state.optimization_method = optimization_method
         
-        # Estimation du temps adaptée au type de tâche
-        n_models = len(selected_models)
-        base_time = max(1, int(len(df) / 500))  # Estimation plus réaliste
+        # NOUVELLE ESTIMATION DU TEMPS plus précise
+        n_features = len(st.session_state.feature_list_for_ml_config)
+        use_smote = st.session_state.preprocessing_choices.get('use_smote', False)
         
-        if task_type == 'unsupervised':
-            time_multiplier = 2  # Clustering généralement plus rapide
-        else:
-            time_multiplier = 3 if optimize_hp else 1
+        estimated_seconds = estimate_training_time(
+            df, len(selected_models), task_type, optimize_hp, n_features, use_smote
+        )
         
-        estimated_time = base_time * n_models * time_multiplier
+        estimated_minutes = max(1, estimated_seconds // 60)
         
-        st.info(f"⏱️ Temps estimé: {estimated_time} minute(s)")
+        st.info(f"⏱️ Temps estimé: {estimated_minutes} minute(s)")
+        
+        # Vérification des ressources système
+        if selected_models:
+            resource_check = check_system_resources(df, len(selected_models))
+            
+            if not resource_check["has_enough_resources"]:
+                st.error("❌ Ressources système insuffisantes")
+                for issue in resource_check["issues"]:
+                    st.error(f"• {issue}")
+            elif resource_check["warnings"]:
+                st.warning("⚠️ Ressources système limites")
+                for warning in resource_check["warnings"]:
+                    st.warning(f"• {warning}")
         
         # Avertissements spécifiques
         if task_type == 'unsupervised' and len(selected_models) > 3:
@@ -847,6 +1034,12 @@ elif st.session_state.current_step == 4:
     if len(st.session_state.selected_models_for_training) > 5:
         config_warnings.append("Beaucoup de modèles sélectionnés (temps long)")
     
+    # Vérification finale des ressources
+    resource_check = check_system_resources(df, len(st.session_state.selected_models_for_training))
+    if not resource_check["has_enough_resources"]:
+        config_issues.extend(resource_check["issues"])
+    config_warnings.extend(resource_check["warnings"])
+    
     # Récapitulatif de configuration adapté
     with st.expander("📋 Récapitulatif Configuration", expanded=True):
         if config_issues:
@@ -885,6 +1078,12 @@ elif st.session_state.current_step == 4:
                     st.write(f"• SMOTE: {'✅' if st.session_state.preprocessing_choices.get('use_smote') else '❌'}")
                 
                 st.write(f"• Normalisation: {'✅' if st.session_state.preprocessing_choices.get('scale_features') else '❌'}")
+                
+            # Informations ressources
+            st.markdown("**💻 Ressources Système**")
+            st.write(f"• Mémoire disponible: {resource_check['available_memory_mb']:.0f} MB")
+            st.write(f"• Mémoire estimée nécessaire: {resource_check['estimated_needed_mb']:.0f} MB")
+            st.write(f"• Statut: {'✅ Suffisante' if resource_check['has_enough_resources'] else '❌ Insuffisante'}")
     
     # Boutons d'action
     col_launch, col_reset, col_info = st.columns([2, 1, 2])
@@ -918,35 +1117,64 @@ elif st.session_state.current_step == 4:
                 'preprocessing_choices': st.session_state.preprocessing_choices
             }
             
-            # Lancement avec monitoring
-            with st.status("🚀 Expérimentation en cours...", expanded=True) as status:
-                try:
-                    start_time = time.time()
+            # NOUVEAU : Lancement avec progression détaillée
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_container = st.empty()
+            
+            try:
+                # Étape 1: Préparation
+                status_text.text("📊 Préparation des données...")
+                progress_bar.progress(10)
+                time.sleep(1)
+                
+                # Étape 2: Entraînement des modèles
+                status_text.text("🤖 Entraînement des modèles en cours...")
+                
+                # Appel principal avec progression
+                n_models = len(st.session_state.selected_models_for_training)
+                results = []
+                
+                for i, model_name in enumerate(st.session_state.selected_models_for_training):
+                    status_text.text(f"🔧 Entraînement {i+1}/{n_models}: {model_name}")
+                    progress_bar.progress(10 + int((i / n_models) * 80))
                     
-                    # Étapes détaillées adaptées
-                    status.write("📊 Préparation des données...")
-                    time.sleep(0.5)
+                    # Entraînement du modèle individuel
+                    model_config = training_config.copy()
+                    model_config['model_names'] = [model_name]
                     
-                    status.write("🤖 Entraînement des modèles...")
+                    try:
+                        model_results = train_models(**model_config)
+                        results.extend(model_results)
+                    except Exception as e:
+                        logger.error(f"Erreur entraînement {model_name}: {e}")
+                        results.append({
+                            "model_name": model_name,
+                            "metrics": {"error": str(e)},
+                            "success": False
+                        })
                     
-                    # Appel principal
-                    results = train_models(**training_config)
-                    
-                    elapsed_time = time.time() - start_time
-                    status.update(
-                        label=f"✅ Expérimentation terminée en {elapsed_time:.1f}s",
-                        state="complete"
-                    )
-                    
-                    # Sauvegarde des résultats
-                    st.session_state.ml_results = results
-                    st.session_state.ml_training_in_progress = False
-                    st.session_state.ml_error_count = 0
-                    
-                    # Analyse rapide des résultats adaptée
-                    successful_models = [r for r in results if not r.get('metrics', {}).get('error')]
-                    failed_models = [r for r in results if r.get('metrics', {}).get('error')]
-                    
+                    time.sleep(0.5)  # Pause pour feedback utilisateur
+                
+                # Étape 3: Finalisation
+                status_text.text("✅ Finalisation de l'expérimentation...")
+                progress_bar.progress(95)
+                time.sleep(1)
+                
+                elapsed_time = time.time() - st.session_state.ml_last_training_time
+                status_text.text(f"✅ Expérimentation terminée en {elapsed_time:.1f}s")
+                progress_bar.progress(100)
+                
+                # Sauvegarde des résultats
+                st.session_state.ml_results = results
+                st.session_state.ml_training_in_progress = False
+                st.session_state.ml_error_count = 0
+                
+                # Analyse rapide des résultats adaptée
+                successful_models = [r for r in results if r.get('success', False) and not r.get('metrics', {}).get('error')]
+                failed_models = [r for r in results if not r.get('success', False) or r.get('metrics', {}).get('error')]
+                
+                with results_container.container():
                     st.success(f"✅ Expérimentation terminée! {len(successful_models)}/{len(results)} modèles réussis")
                     
                     if successful_models:
@@ -969,22 +1197,19 @@ elif st.session_state.current_step == 4:
                     
                     # Navigation
                     st.balloons()
-                    time.sleep(2)
-                    if st.button("📈 Voir les résultats détaillés"):
+                    if st.button("📈 Voir les résultats détaillés", use_container_width=True):
                         st.switch_page("pages/3_📈_Évaluation_du_Modèle.py")
                     
-                except Exception as e:
-                    st.session_state.ml_training_in_progress = False
-                    st.session_state.ml_error_count = st.session_state.get('ml_error_count', 0) + 1
-                    
-                    error_msg = str(e)
-                    st.error(f"❌ Erreur durant l'entraînement: {error_msg[:200]}")
-                    logger.error(f"Training failed: {e}", exc_info=True)
-                    
-                    status.update(
-                        label="❌ Expérimentation échouée",
-                        state="error"
-                    )
+            except Exception as e:
+                st.session_state.ml_training_in_progress = False
+                st.session_state.ml_error_count = st.session_state.get('ml_error_count', 0) + 1
+                
+                error_msg = str(e)
+                status_text.text("❌ Expérimentation échouée")
+                progress_bar.progress(0)
+                
+                st.error(f"❌ Erreur durant l'entraînement: {error_msg[:200]}")
+                logger.error(f"Training failed: {e}", exc_info=True)
     
     with col_reset:
         if st.button("🔄 Reset Config", use_container_width=True, help="Remet à zéro la configuration"):
@@ -994,7 +1219,8 @@ elif st.session_state.current_step == 4:
                 'feature_list_for_ml_config',
                 'selected_models_for_training',
                 'ml_results',
-                'task_type'
+                'task_type',
+                'previous_task_type'
             ]
             for key in ml_keys_to_reset:
                 if key in st.session_state:

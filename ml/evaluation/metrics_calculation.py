@@ -1,4 +1,3 @@
-import logging
 import pandas as pd
 import numpy as np
 from sklearn.metrics import (
@@ -8,10 +7,9 @@ from sklearn.metrics import (
     silhouette_score, davies_bouldin_score, calinski_harabasz_score,
     explained_variance_score, mean_squared_log_error
 )
-from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional
 import warnings
 import time
 import gc

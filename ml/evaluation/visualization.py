@@ -5,9 +5,14 @@ from plotly.subplots import make_subplots
 import time
 import logging
 import psutil
-import gc
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from functools import wraps
+import shap
+import platform
+import sklearn
+import shap
+from sklearn.model_selection import learning_curve
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,11 @@ class ModelEvaluationVisualizer:
             
             validation["results_count"] = len(self.ml_results)
             validation["has_results"] = True
+
+            # Guard rail mémoire
+            mem = get_system_metrics()
+            if mem['memory_percent'] > 90:
+                logger.warning(f"⚠️ Validation lancée avec RAM critique: {mem['memory_percent']}%")
             
             # Séparation des modèles réussis/échoués
             for result in self.ml_results:
@@ -82,6 +92,7 @@ class ModelEvaluationVisualizer:
                     best = successful[0]
                 
                 validation["best_model"] = self._safe_get(best, ['model_name'], 'Unknown')
+            logger.info(f"Validation terminée: {len(validation['successful_models'])} modèles OK, {len(validation['failed_models'])} erreurs")
             
         except Exception as e:
             validation["errors"].append(f"Erreur validation: {str(e)}")
@@ -307,6 +318,13 @@ class ModelEvaluationVisualizer:
             'total_models': len(self.ml_results),
             'successful_models': len(self.validation_result["successful_models"]),
             'failed_models': len(self.validation_result["failed_models"]),
+            'metadata': {
+                'python_version': platform.python_version(),
+                'numpy_version': np.__version__,
+                'pandas_version': pd.__version__,
+                'sklearn_version': sklearn.__version__,
+                'platform': platform.platform()
+            },
             'models': []
         }
         
@@ -322,6 +340,73 @@ class ModelEvaluationVisualizer:
         
         return export_data
     
+    def create_shap_plot(self, model, X_sample, feature_names: List[str]) -> go.Figure:
+        """Crée un graphique SHAP bar plot pour expliquer les features"""
+        try:
+            explainer = shap.Explainer(model, X_sample)
+            shap_values = explainer(X_sample)
+            
+            mean_abs_shap = np.abs(shap_values.values).mean(axis=0)
+            importance_df = pd.DataFrame({
+                'feature': feature_names,
+                'importance': mean_abs_shap
+            }).sort_values('importance', ascending=True).tail(15)
+            
+            fig = go.Figure(go.Bar(
+                x=importance_df['importance'],
+                y=importance_df['feature'],
+                orientation='h',
+                marker=dict(color=importance_df['importance'], colorscale='RdBu'),
+                text=[f"{imp:.3f}" for imp in importance_df['importance']],
+                textposition='outside'
+            ))
+            
+            fig.update_layout(
+                title="Top 15 - Importance des Features (SHAP)",
+                xaxis_title="Impact Moyen Absolu",
+                yaxis_title="Features",
+                height=500,
+                template="plotly_white"
+            )
+            return fig
+        
+        except Exception as e:
+            logger.error(f"SHAP plot creation failed: {e}")
+            return self._create_empty_plot("Erreur création SHAP")
+
+
+    def create_learning_curve_plot(self, model, X, y, cv=5, scoring='accuracy') -> go.Figure:
+        """Affiche les courbes d'apprentissage pour détecter overfitting/underfitting"""
+        try:
+            train_sizes, train_scores, val_scores = learning_curve(
+                model, X, y, cv=cv, scoring=scoring, n_jobs=-1
+            )
+            train_mean = train_scores.mean(axis=1)
+            val_mean = val_scores.mean(axis=1)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=train_sizes, y=train_mean, mode='lines+markers',
+                name="Train", line=dict(color='blue')
+            ))
+            fig.add_trace(go.Scatter(
+                x=train_sizes, y=val_mean, mode='lines+markers',
+                name="Validation", line=dict(color='orange')
+            ))
+            
+            fig.update_layout(
+                title="Courbes d'Apprentissage",
+                xaxis_title="Taille des données d'entraînement",
+                yaxis_title=f"Score ({scoring})",
+                template="plotly_white",
+                height=500
+            )
+            return fig
+        
+        except Exception as e:
+            logger.error(f"Learning curve plot failed: {e}")
+            return self._create_empty_plot("Erreur courbes d'apprentissage")
+        
     def create_confusion_matrix_plot(self, confusion_matrix: List[List[int]], class_names: List[str] = None) -> go.Figure:
         """Crée une heatmap de matrice de confusion"""
         try:

@@ -88,20 +88,27 @@ def check_system_health():
                 st.rerun()
 
 def cleanup_memory():
-    """Nettoyage mémoire avec logging"""
+    """Nettoyage mémoire robuste avec logs"""
     try:
-        # Garbage collection Python
         collected = gc.collect()
         
-        # Nettoyage cache Streamlit
+        # Cache Streamlit
         if hasattr(st, 'cache_data'):
             st.cache_data.clear()
-            
+        if hasattr(st, 'cache_resource'):
+            st.cache_resource.clear()
+        
+        # Optionnel : suppression d’objets lourds en session
+        for key in list(st.session_state.keys()):
+            if key.startswith("_") or key in ["df", "df_raw"]:
+                continue
+            if isinstance(st.session_state[key], (pd.DataFrame, dict, list)):
+                del st.session_state[key]
+        
         logger.info(f"Memory cleanup: {collected} objects collected")
         return collected
-        
     except Exception as e:
-        logger.error(f"Memory cleanup failed: {e}")
+        logger.error(f"Memory cleanup failed: {e}", exc_info=True)
         return 0
 
 # --- Fonctions de Gestion d'État ---
@@ -186,6 +193,15 @@ def reset_app_state():
     except Exception as e:
         logger.error(f"Erreur lors de la réinitialisation : {e}")
         st.error(f"Erreur lors de la réinitialisation : {e}")
+
+from logging.handlers import RotatingFileHandler
+# Configuration avancée du logging avec rotation 
+# 5 fichiers max de 5MB, évitant que les logs ne saturent le disque
+def setup_logging():
+    log_file = "logs/datalab_pro.log"
+    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)  
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
+
 
 def validate_session_state() -> bool:
     """

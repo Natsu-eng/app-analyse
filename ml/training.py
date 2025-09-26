@@ -1,18 +1,14 @@
-import logging
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, StratifiedKFold, KFold
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import accuracy_score, r2_score, silhouette_score
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
+from imblearn.pipeline import Pipeline
 from imblearn.over_sampling import SMOTE
 import joblib
 import os
 import time
 import gc
 import psutil
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple
 import warnings
 from sklearn.exceptions import ConvergenceWarning
 
@@ -21,16 +17,11 @@ warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # Import des modules de l'application
-from ml.catalog import MODEL_CATALOG, get_model_config
+from ml.catalog import get_model_config
 from ml.data_preprocessing import create_preprocessor, safe_label_encode
-from ml.evaluation.metrics_calculation import (
-    calculate_global_metrics, 
-    evaluate_single_train_test_split,
-    EvaluationMetrics,
-    validate_input_data,
-    safe_array_conversion
-)
-from utils.data_analysis import auto_detect_column_types, get_target_and_task
+from ml.evaluation.metrics_calculation import EvaluationMetrics
+
+from utils.data_analysis import auto_detect_column_types
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -386,14 +377,14 @@ def train_single_model_unsupervised(
                 verbose=0
             )
             
-            grid_search.fit(X)
+            grid_search.fit_predict(X)
             result["model"] = grid_search.best_estimator_
             result["best_params"] = grid_search.best_params_
             result["success"] = True
             
         else:
             # Entraînement simple
-            pipeline.fit(X)
+            pipeline.fit_predict(X)
             result["model"] = pipeline
             result["success"] = True
         

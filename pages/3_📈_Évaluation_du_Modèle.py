@@ -7,7 +7,9 @@ import json
 import gc
 import plotly.graph_objects as go
 from ml.evaluation.visualization import ModelEvaluationVisualizer
-from ml.evaluation.metrics_calculation import EvaluationMetrics, get_system_metrics
+from ml.evaluation.metrics_calculation import get_system_metrics
+
+from utils.report_generator import generate_pdf_report 
 
 # Configuration de la page
 st.set_page_config(
@@ -64,6 +66,14 @@ def get_performance_class(value: float, metric_type: str) -> str:
             else: return "performance-low"
     except: pass
     return ""
+
+def generate_model_pdf_report(model_result: dict) -> bytes:
+    """Génère un rapport PDF pour un modèle spécifique"""
+    try:
+        return generate_pdf_report(model_result)
+    except Exception as e:
+        st.error(f"Erreur génération PDF: {e}")
+        return None
 
 def main():
     st.title("📈 Évaluation Détaillée des Modèles")
@@ -128,6 +138,7 @@ def main():
         # Export rapide
         if validation["successful_models"]:
             st.header("📥 Export Rapide")
+            
             try:
                 export_data = []
                 for result in validation["successful_models"]:
@@ -153,22 +164,53 @@ def main():
                 if export_data:
                     df_export = pd.DataFrame(export_data)
                     csv_data = df_export.to_csv(index=False)
+                    
+                    # CSV Rapide
                     st.download_button(
-                        label="📄 CSV Résultats",
+                        label="📄 CSV Résumé",
                         data=csv_data,
                         file_name=f"resultats_{validation['task_type']}_{int(time.time())}.csv",
                         mime="text/csv",
                         use_container_width=True
                     )
+                    
+                    # NOUVEAU : PDF Rapide du meilleur modèle
+                    if validation["best_model"]:
+                        st.markdown("---")
+                        st.subheader("📊 PDF Rapide")
+                        
+                        best_model_result = next(
+                            (r for r in validation["successful_models"] 
+                            if evaluator._safe_get(r, ['model_name'], '') == validation["best_model"]), 
+                            None
+                        )
+                        
+                        if best_model_result:
+                            try:
+                                pdf_bytes = generate_pdf_report(best_model_result)
+                                if pdf_bytes:
+                                    st.download_button(
+                                        label="🎯 PDF Meilleur Modèle",
+                                        data=pdf_bytes,
+                                        file_name=f"rapport_{validation['best_model']}_{int(time.time())}.pdf",
+                                        mime="application/pdf",
+                                        use_container_width=True
+                                    )
+                            except Exception as e:
+                                st.error(f"Erreur PDF: {e}")
+                    
             except Exception as e:
-                st.error(f"Erreur export: {e}")
+                st.error(f"❌ Erreur export: {e}")
+        
     
     # Onglets principaux
-    tab_comparison, tab_individual, tab_analysis, tab_export = st.tabs([
-        "📊 Vue Globale", 
-        "🔍 Analyse Détaillée", 
-        "📈 Métriques Avancées",
-        "💾 Export Complet"
+    tab_comparison, tab_individual, tab_analysis, tab_explain, tab_learning, tab_export = st.tabs([
+    "📊 Vue Globale", 
+    "🔍 Analyse Détaillée", 
+    "📈 Métriques Avancées",
+    "🧩 Explicabilité",
+    "📉 Courbes d'Apprentissage",
+    "💾 Export Complet"
     ])
     
     with tab_comparison:
@@ -308,43 +350,200 @@ def main():
         
         else:
             st.warning("Aucune métrique avancée disponible")
+
+    with tab_explain:
+        st.header("🧩 Explicabilité des Modèles")
+        
+        if validation["successful_models"]:
+            model_names = [evaluator._safe_get(r, ['model_name'], f'Modèle_{i}') 
+                        for i, r in enumerate(validation["successful_models"])]
+            
+            selected_model = st.selectbox("Sélectionnez un modèle pour l'explication", model_names)
+            selected_result = next((r for r in validation["successful_models"] 
+                                if evaluator._safe_get(r, ['model_name'], '') == selected_model), None)
+            
+            if selected_result:
+                st.subheader(f"SHAP - Importance des Features ({selected_model})")
+                
+                try:
+                    model = evaluator._safe_get(selected_result, ['fitted_model'])
+                    X_sample = evaluator._safe_get(selected_result, ['X_sample'])  # petit subset stocké pendant training
+                    feature_names = evaluator._safe_get(selected_result, ['feature_names'], [])
+                    
+                    if model is not None and X_sample is not None:
+                        fig = evaluator.create_shap_plot(model, X_sample, feature_names)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("Données nécessaires pour SHAP non disponibles")
+                except Exception as e:
+                    st.error(f"Erreur SHAP: {e}")
+                
+                st.subheader("Importance des Features (classique)")
+                try:
+                    model = evaluator._safe_get(selected_result, ['fitted_model'])
+                    feature_names = evaluator._safe_get(selected_result, ['feature_names'], [])
+                    if model is not None and feature_names:
+                        fig_imp = evaluator.create_feature_importance_plot(model, feature_names)
+                        st.plotly_chart(fig_imp, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Erreur importance features: {e}")
+        else:
+            st.warning("Aucun modèle disponible pour l'explication")
+
+    with tab_learning:
+        st.header("📉 Courbes d'Apprentissage - Détection Overfitting/Underfitting")
+        
+        if validation["successful_models"]:
+            model_names = [evaluator._safe_get(r, ['model_name'], f'Modèle_{i}') 
+                        for i, r in enumerate(validation["successful_models"])]
+            
+            selected_model = st.selectbox("Sélectionnez un modèle", model_names, key="learning_selector")
+            selected_result = next((r for r in validation["successful_models"] 
+                                if evaluator._safe_get(r, ['model_name'], '') == selected_model), None)
+            
+            if selected_result:
+                try:
+                    model = evaluator._safe_get(selected_result, ['fitted_model'])
+                    X_train = evaluator._safe_get(selected_result, ['X_train'])
+                    y_train = evaluator._safe_get(selected_result, ['y_train'])
+                    if model is not None and X_train is not None and y_train is not None:
+                        fig = evaluator.create_learning_curve_plot(model, X_train, y_train)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("Données nécessaires pour courbes d'apprentissage non disponibles")
+                except Exception as e:
+                    st.error(f"Erreur courbes d'apprentissage: {e}")
+        else:
+            st.warning("Aucun modèle disponible pour analyse des courbes d'apprentissage")
     
     with tab_export:
         st.header("Export Complet des Résultats")
         
         if validation["successful_models"]:
-            # Export CSV
-            df_export = evaluator.get_comparison_dataframe()
-            st.download_button(
-                label="📄 Exporter en CSV",
-                data=df_export.to_csv(index=False),
-                file_name=f"resultats_ml_{int(time.time())}.csv",
-                mime="text/csv"
-            )
+            # Section Export CSV/JSON
+            col1, col2 = st.columns(2)
             
-            # Export JSON
-            export_data = evaluator.get_export_data()
-            st.download_button(
-                label="📊 Exporter en JSON",
-                data=json.dumps(export_data, indent=2, ensure_ascii=False, default=str),
-                file_name=f"resultats_ml_{int(time.time())}.json",
-                mime="application/json"
-            )
+            with col1:
+                # Export CSV
+                df_export = evaluator.get_comparison_dataframe()
+                st.download_button(
+                    label="📄 Exporter en CSV",
+                    data=df_export.to_csv(index=False),
+                    file_name=f"resultats_ml_{int(time.time())}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
             
-            st.subheader("Aperçu des données exportées")
+            with col2:
+                # Export JSON
+                export_data = evaluator.get_export_data()
+                st.download_button(
+                    label="📊 Exporter en JSON",
+                    data=json.dumps(export_data, indent=2, ensure_ascii=False, default=str),
+                    file_name=f"resultats_ml_{int(time.time())}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            # SECTION : RAPPORTS PDF
+            st.markdown("---")
+            st.subheader("📊 Rapports PDF Détaillés")
+            
+            # Sélecteur de modèle pour PDF
+            pdf_model_names = [evaluator._safe_get(r, ['model_name'], f'Modèle_{i}') 
+                             for i, r in enumerate(validation["successful_models"])]
+            
+            if pdf_model_names:
+                selected_pdf_model = st.selectbox(
+                    "Sélectionnez un modèle pour le rapport PDF détaillé",
+                    pdf_model_names,
+                    key="pdf_model_selector"
+                )
+                
+                # Trouver le résultat correspondant
+                selected_pdf_result = next(
+                    (r for r in validation["successful_models"] 
+                     if evaluator._safe_get(r, ['model_name'], '') == selected_pdf_model), 
+                    None
+                )
+                
+                col_pdf1, col_pdf2 = st.columns([3, 1])
+                
+                with col_pdf1:
+                    if selected_pdf_result and st.button("📄 Générer le rapport PDF détaillé", 
+                                                       use_container_width=True, 
+                                                       key="generate_pdf"):
+                        with st.spinner("Génération du rapport PDF en cours..."):
+                            try:
+                                pdf_bytes = generate_pdf_report(selected_pdf_result)
+                                
+                                if pdf_bytes:
+                                    st.success("✅ Rapport PDF généré avec succès!")
+                            except Exception as e:
+                                st.error(f"Erreur génération PDF: {e}")
+                                    
+                with col_pdf2:
+                    if selected_pdf_result:
+                        try:
+                            pdf_bytes = generate_pdf_report(selected_pdf_result)
+                            if pdf_bytes:
+                                st.download_button(
+                                    label="📥 Télécharger PDF",
+                                    data=pdf_bytes,
+                                    file_name=f"rapport_{selected_pdf_model}_{int(time.time())}.pdf",
+                                    mime="application/pdf",
+                                    use_container_width=True
+                                )
+                        except Exception as e:
+                            st.error(f"Erreur génération PDF: {e}")
+            
+            # Rapport PDF global
+            st.markdown("---")
+            st.subheader("📚 Rapport PDF Global")
+            
+            if st.button("🌐 Générer rapport global PDF", use_container_width=True):
+                with st.spinner("Génération du rapport global..."):
+                    try:
+                        # Générer PDF pour le meilleur modèle comme rapport global
+                        if validation["best_model"]:
+                            best_model_result = next(
+                                (r for r in validation["successful_models"] 
+                                 if evaluator._safe_get(r, ['model_name'], '') == validation["best_model"]), 
+                                None
+                            )
+                            
+                            if best_model_result:
+                                pdf_bytes = generate_pdf_report(best_model_result)
+                                
+                                if pdf_bytes:
+                                    st.success("✅ Rapport global PDF généré!")
+                                    st.download_button(
+                                        label="📥 Télécharger rapport global PDF",
+                                        data=pdf_bytes,
+                                        file_name=f"rapport_global_{validation['task_type']}_{int(time.time())}.pdf",
+                                        mime="application/pdf",
+                                        use_container_width=True
+                                    )
+                        
+                    except Exception as e:
+                        st.error(f"❌ Erreur génération rapport global: {e}")
+            
+            # Aperçu des données (existant)
+            st.markdown("---")
+            st.subheader("📋 Aperçu des données exportées")
             st.dataframe(df_export, use_container_width=True)
             
             # Statistiques d'export
-            col1, col2 = st.columns(2)
-            with col1:
+            col_stat1, col_stat2 = st.columns(2)
+            with col_stat1:
                 st.info(f"**Total modèles:** {len(export_data['models'])}")
                 st.info(f"**Type de tâche:** {export_data['task_type']}")
-            with col2:
+            with col_stat2:
                 st.info(f"**Meilleur modèle:** {export_data['best_model']}")
                 st.info(f"**Date export:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(export_data['timestamp']))}")
         
         else:
-            st.warning("Aucune donnée à exporter")
+            st.warning("❌ Aucune donnée à exporter")
 
 if __name__ == "__main__":
     main()
