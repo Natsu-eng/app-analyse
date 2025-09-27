@@ -1,7 +1,6 @@
 import os
 import streamlit as st
 import pandas as pd
-import dask.dataframe as dd
 import time
 import logging
 import re
@@ -9,15 +8,13 @@ import psutil
 import gc
 import numpy as np
 from functools import wraps
-from typing import Dict, List, Optional, Tuple, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Any
 
 from utils.data_analysis import (
     compute_if_dask,
     is_dask_dataframe,
     auto_detect_column_types,
     detect_useless_columns,
-    get_data_profile,
     cleanup_memory
 )
 from plots.exploratory import (

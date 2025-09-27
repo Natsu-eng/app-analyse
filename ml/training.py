@@ -105,15 +105,15 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
         "is_valid": True,
         "issues": [],
         "warnings": [],
-        "samples_count": len(X),
-        "features_count": len(X.columns) if hasattr(X, 'columns') else X.shape[1]
+        "samples_count": len(X) if X is not None else 0,
+        "features_count": len(X.columns) if hasattr(X, 'columns') else (X.shape[1] if X is not None else 0)
     }
     
     try:
         # Vérification des dimensions
-        if len(X) == 0:
+        if X is None or len(X) == 0:
             validation["is_valid"] = False
-            validation["issues"].append("Dataset vide")
+            validation["issues"].append("Dataset X vide ou None")
             return validation
             
         if len(X) < MIN_SAMPLES_REQUIRED:
@@ -125,7 +125,7 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
             validation["issues"].append("Aucune feature disponible")
         
         # Vérification spécifique au non-supervisé
-        if task_type == 'unsupervised':
+        if task_type == 'clustering':
             if y is not None:
                 validation["warnings"].append("Target ignorée pour le clustering")
             # Pour le clustering, vérifier qu'on a assez de features numériques
@@ -206,6 +206,9 @@ def create_leak_free_pipeline(
         
         # Créer le préprocesseur - ATTENTION: Sera appliqué dans le pipeline
         preprocessor = create_preprocessor(preprocessing_choices, column_types)
+        if preprocessor is None:
+            logger.error(f"Échec création préprocesseur pour {model_name}")
+            return None, None
         
         # Construction du pipeline SANS DATA LEAKAGE
         pipeline_steps = [('preprocessor', preprocessor)]
@@ -415,8 +418,8 @@ def evaluate_model_with_metrics_calculator(
     
     Args:
         model: Modèle entraîné
-        X_test: Données de test (None pour unsupervised)
-        y_test: Labels de test (None pour unsupervised)
+        X_test: Données de test (None pour clustering)
+        y_test: Labels de test (None pour clustering)
         task_type: Type de tâche
         label_encoder: Encodeur de labels
         X_data: Données complètes (pour clustering)
@@ -427,12 +430,12 @@ def evaluate_model_with_metrics_calculator(
     try:
         metrics_calculator = EvaluationMetrics(task_type)
         
-        if task_type == 'unsupervised':
+        if task_type == 'clustering':
             # Pour le clustering
             if X_data is None:
                 return {"error": "Données X requises pour l'évaluation non supervisée"}
             
-            cluster_labels = model.predict(X_data)
+            cluster_labels = model.fit_predict(X_data)
             
             # Calcul des métriques de clustering
             metrics = metrics_calculator.calculate_unsupervised_metrics(X_data.values, cluster_labels)
@@ -480,7 +483,7 @@ def evaluate_model_with_metrics_calculator(
 
 def train_models(
     df: pd.DataFrame,
-    target_column: Optional[str],  # Peut être None pour unsupervised
+    target_column: Optional[str],  # Peut être None pour clustering
     model_names: List[str],
     task_type: str,
     test_size: float = 0.2,
@@ -494,10 +497,10 @@ def train_models(
     
     Args:
         df: DataFrame contenant les données
-        target_column: Colonne cible (None pour non-supervisé)
+        target_column: Colonne cible (None pour clustering)
         model_names: Liste des noms de modèles à entraîner
-        task_type: Type de tâche ML ('classification', 'regression', 'unsupervised')
-        test_size: Proportion des données de test (ignoré pour unsupervised)
+        task_type: Type de tâche ML ('classification', 'regression', 'clustering')
+        test_size: Proportion des données de test (ignoré pour clustering)
         optimize: Optimiser les hyperparamètres
         feature_list: Liste des features à utiliser
         use_smote: Utiliser SMOTE (seulement pour classification)
@@ -512,8 +515,8 @@ def train_models(
     monitor.start_training()
     
     # Validation et préparation des paramètres
-    if task_type == 'unsupervised':
-        # Pour non-supervisé, ignorer target_column et use_smote
+    task_type = 'clustering' if task_type == 'unsupervised' else task_type  # Harmonisation
+    if task_type == 'clustering':
         target_column = None
         use_smote = False
         test_size = 0.0  # Pas de split pour clustering
@@ -540,7 +543,10 @@ def train_models(
         # Préparation des données
         logger.info("Préparation des données...")
         
-        X = df[feature_list].copy()
+        X = df[feature_list].copy() if df is not None else None
+        if X is None:
+            logger.error("DataFrame d'entrée est None")
+            return [{"model_name": "Validation", "metrics": {"error": "DataFrame d'entrée est None"}}]
         
         # Gestion de la target selon le type de tâche
         y = None
@@ -548,7 +554,7 @@ def train_models(
         label_encoder = None
         encoding_map = None
         
-        if task_type != 'unsupervised' and target_column:
+        if task_type != 'clustering' and target_column:
             y_raw = df[target_column].copy()
             y_encoded, label_encoder, encoding_map = safe_label_encode(y_raw)
             y = pd.Series(y_encoded, index=y_raw.index, name=target_column)
@@ -572,7 +578,7 @@ def train_models(
         # Split train-test SEULEMENT pour supervisé
         X_train, X_test, y_train, y_test = None, None, None, None
         
-        if task_type != 'unsupervised':
+        if task_type != 'clustering':
             try:
                 stratification = y if task_type == 'classification' else None
                 X_train, X_test, y_train, y_test = train_test_split(
@@ -586,7 +592,7 @@ def train_models(
                 logger.error(f"Erreur lors du split: {split_error}")
                 return [{"model_name": "Split", "metrics": {"error": str(split_error)}}]
         else:
-            logger.info(f"Mode non-supervisé: utilisation de tout le dataset ({len(X)} échantillons)")
+            logger.info(f"Mode clustering: utilisation de tout le dataset ({len(X)} échantillons)")
         
         # Entraînement de chaque modèle
         successful_models = 0
@@ -628,7 +634,7 @@ def train_models(
                 continue
             
             # Entraînement selon le type de tâche
-            if task_type == 'unsupervised':
+            if task_type == 'clustering':
                 training_result = train_single_model_unsupervised(
                     model_name=model_name,
                     pipeline=pipeline,
@@ -653,7 +659,7 @@ def train_models(
             if training_result["success"] and training_result["model"] is not None:
                 try:
                     # Évaluation robuste avec EvaluationMetrics
-                    if task_type == 'unsupervised':
+                    if task_type == 'clustering':
                         metrics = evaluate_model_with_metrics_calculator(
                             model=training_result["model"],
                             X_test=None,
@@ -686,9 +692,53 @@ def train_models(
                         "model": training_result["model"],
                         "label_encoder": label_encoder,
                         "feature_names": feature_list,
-                        "task_type": task_type
+                        "task_type": task_type 
                     }
-                    
+
+                    # Ajout des données pour visualisations
+                    try:
+                        # Échantillonnage pour réduire la charge mémoire
+                        max_samples = 1000
+                        if task_type == 'clustering':
+                            # Stockage des données et labels pour clustering
+                            if X is None or len(X) == 0:
+                                logger.error(f"X est None ou vide pour {model_name}")
+                                result["X_sample"] = None
+                                result["labels"] = None
+                            else:
+                                X_sample = X.sample(n=min(max_samples, len(X)), random_state=42) if len(X) > max_samples else X
+                                if 'DBSCAN' in model_name:
+                                    # DBSCAN utilise labels_ au lieu de predict
+                                    cluster_labels = training_result["model"].named_steps['model'].labels_
+                                    if len(cluster_labels) > len(X_sample):
+                                        cluster_labels = cluster_labels[X_sample.index]
+                                    elif len(cluster_labels) < len(X_sample):
+                                        logger.warning(f"Labels incomplets pour DBSCAN, recalcul...")
+                                        cluster_labels = training_result["model"].fit_predict(X_sample)
+                                else:
+                                    cluster_labels = training_result["model"].predict(X_sample)
+                                result["X_sample"] = X_sample
+                                result["labels"] = cluster_labels
+                        else:
+                            # Supervisé
+                            if X_test is None or len(X_test) == 0:
+                                logger.error(f"X_test est None ou vide pour {model_name}")
+                                result["X_sample"] = None
+                            else:
+                                X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42) if len(X_test) > max_samples else X_test
+                                result["X_sample"] = X_sample
+                                result["X_train"] = X_train.sample(n=min(max_samples, len(X_train)), random_state=42) if len(X_train) > max_samples else X_train
+                                result["y_train"] = y_train.loc[result["X_train"].index]  # Aligner indices
+                                if task_type == 'classification' and label_encoder is not None:
+                                    result["class_names"] = label_encoder.classes_.tolist()
+
+                            logger.info(f"Données de visualisation ajoutées pour {model_name}")
+                    except Exception as e:
+                        logger.error(f"Erreur ajout données visualisation pour {model_name}: {e}")
+                        result["metrics"]["visualization_error"] = str(e)
+                        result["X_sample"] = None
+                        result["labels"] = None
+
                     results.append(result)
                     successful_models += 1
                     
@@ -710,6 +760,9 @@ def train_models(
                     "metrics": {"error": error_msg},
                     "training_time": training_result["training_time"]
                 })
+            
+            # Nettoyage mémoire après chaque modèle
+            gc.collect()
         
         # Rapport final
         total_time = monitor.get_total_duration()

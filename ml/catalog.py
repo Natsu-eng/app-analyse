@@ -196,7 +196,7 @@ MODEL_CATALOG = {
             }
         }
     },
-    "unsupervised": {
+    "clustering": {
         "K-Means": {
             "model": KMeans(random_state=42, n_init=10),
             "params": {

@@ -7,14 +7,11 @@ from sklearn.metrics import (
     silhouette_score, davies_bouldin_score, calinski_harabasz_score,
     explained_variance_score, mean_squared_log_error
 )
-import matplotlib.pyplot as plt
-import seaborn as sns
 from typing import Dict, List, Any, Optional
 import warnings
 import time
 import gc
-from io import BytesIO
-import base64
+import psutil
 
 # Configuration des warnings
 warnings.filterwarnings("ignore")
@@ -27,7 +24,7 @@ class EvaluationMetrics:
     """Classe pour calculer et gérer les métriques d'évaluation de façon robuste"""
     
     def __init__(self, task_type: str):
-        self.task_type = task_type
+        self.task_type = 'clustering' if task_type == 'unsupervised' else task_type  # Harmonisation
         self.metrics = {}
         self.error_messages = []
         
@@ -134,7 +131,7 @@ class EvaluationMetrics:
                     'median_error': float(np.median(errors))
                 }
             
-            # Ratio d'amélioration par rapport à la baseline (moyenne)
+            # Ratio d'amélioration par rapport à la baseline
             baseline_pred = np.full_like(y_true, np.mean(y_true))
             baseline_mse = mean_squared_error(y_true, baseline_pred)
             if metrics['mse'] is not None and baseline_mse > 0:
@@ -147,33 +144,45 @@ class EvaluationMetrics:
         return metrics
     
     def calculate_unsupervised_metrics(self, X: np.ndarray, labels: np.ndarray) -> Dict[str, Any]:
-        """Calcule les métriques pour les problèmes non supervisés"""
+        """Calcule les métriques pour les problèmes de clustering"""
         metrics = {}
-        
+
         try:
-            n_clusters = len(np.unique(labels))
+            # Validation des données
+            if len(X) != len(labels):
+                raise ValueError(f"Incohérence dimensions: X={len(X)}, labels={len(labels)}")
             
+            # Labels valides (>=0) pour les clusters
+            valid_mask = labels >= 0
+            valid_labels = labels[valid_mask]
+            valid_X = X[valid_mask]
+            n_clusters = len(np.unique(valid_labels))
+
             if n_clusters > 1:
-                metrics['silhouette_score'] = self.safe_metric_calculation(silhouette_score, X, labels)
-                metrics['davies_bouldin_score'] = self.safe_metric_calculation(davies_bouldin_score, X, labels)
-                metrics['calinski_harabasz_score'] = self.safe_metric_calculation(calinski_harabasz_score, X, labels)
+                metrics['silhouette_score'] = self.safe_metric_calculation(silhouette_score, valid_X, labels=valid_labels)
+                metrics['davies_bouldin_score'] = self.safe_metric_calculation(davies_bouldin_score, valid_X, labels=valid_labels)
+                metrics['calinski_harabasz_score'] = self.safe_metric_calculation(calinski_harabasz_score, valid_X, labels=valid_labels)
             else:
                 metrics['silhouette_score'] = None
                 metrics['davies_bouldin_score'] = None
                 metrics['calinski_harabasz_score'] = None
-            
+                self.error_messages.append("Pas assez de clusters valides pour calculer les métriques")
+
+            # Nombre de clusters et tailles
             metrics['n_clusters'] = n_clusters
-            metrics['cluster_sizes'] = {f"Cluster {i}": int(count) for i, count in enumerate(np.bincount(labels))}
-            
+            metrics['cluster_sizes'] = {f"Cluster {i}": int(count) 
+                                        for i, count in enumerate(np.bincount(valid_labels))}
+            metrics['n_outliers'] = int(np.sum(labels == -1))
+
             # Qualité du clustering
             if n_clusters > 1:
-                cluster_quality = self._evaluate_cluster_quality(X, labels)
+                cluster_quality = self._evaluate_cluster_quality(valid_X, valid_labels)
                 metrics.update(cluster_quality)
-            
+
         except Exception as e:
-            logger.error(f"Erreur critique calcul métriques non supervisées: {e}")
+            logger.error(f"Erreur critique calcul métriques clustering: {e}")
             metrics['error'] = str(e)
-        
+
         return metrics
     
     def _evaluate_cluster_quality(self, X: np.ndarray, labels: np.ndarray) -> Dict[str, Any]:
@@ -191,7 +200,6 @@ class EvaluationMetrics:
                     cluster_centers.append(np.mean(cluster_points, axis=0))
             
             if len(cluster_centers) > 1:
-                # Distance moyenne entre les centres des clusters
                 from scipy.spatial.distance import pdist
                 center_distances = pdist(cluster_centers)
                 quality['avg_inter_cluster_distance'] = float(np.mean(center_distances))
@@ -229,15 +237,13 @@ def safe_array_conversion(data: Any, max_samples: int = 100000) -> np.ndarray:
             data = data.values
         
         if isinstance(data, np.ndarray):
-            # Échantillonnage si trop grand
             if len(data) > max_samples:
                 rng = np.random.RandomState(42)
                 indices = rng.choice(len(data), size=max_samples, replace=False)
                 data = data[indices]
             
-            return data.flatten() if data.ndim > 1 else data
+            return data.flatten() if data.ndim > 1 and data.shape[1] == 1 else data
         
-        # Conversion depuis d'autres types
         return np.array(data).flatten()
         
     except Exception as e:
@@ -264,6 +270,9 @@ def validate_input_data(y_true: Any, y_pred: Any, task_type: str) -> Dict[str, A
     }
     
     try:
+        # Harmonisation task_type
+        task_type = 'clustering' if task_type == 'unsupervised' else task_type
+        
         # Conversion sécurisée
         y_true_flat = safe_array_conversion(y_true)
         y_pred_flat = safe_array_conversion(y_pred)
@@ -294,14 +303,17 @@ def validate_input_data(y_true: Any, y_pred: Any, task_type: str) -> Dict[str, A
                 validation["warnings"].append("Moins de 2 classes dans y_pred")
         
         elif task_type == "regression":
-            # Vérifier les valeurs extrêmes
             if np.any(np.isinf(y_true_flat)) or np.any(np.isinf(y_pred_flat)):
                 validation["warnings"].append("Valeurs infinies détectées")
             
             if np.any(np.isnan(y_true_flat)) or np.any(np.isnan(y_pred_flat)):
                 validation["warnings"].append("Valeurs NaN détectées")
         
-        # Vérification du nombre d'échantillons
+        elif task_type == "clustering":
+            unique_labels = np.unique(y_pred_flat)
+            if len(unique_labels) < 2 and -1 not in unique_labels:
+                validation["warnings"].append("Moins de 2 clusters valides détectés")
+        
         if validation["n_samples"] < 10:
             validation["warnings"].append("Très peu d'échantillons pour l'évaluation")
         
@@ -322,7 +334,6 @@ def calculate_global_metrics(
 ) -> Dict[str, Any]:
     """
     Calcule les métriques de performance sur un ensemble agrégé de prédictions.
-    Version robuste avec gestion complète des erreurs.
     
     Args:
         y_true_all: Liste des valeurs réelles
@@ -336,6 +347,7 @@ def calculate_global_metrics(
         Dictionnaire des métriques
     """
     start_time = time.time()
+    task_type = 'clustering' if task_type == 'unsupervised' else task_type  # Harmonisation
     evaluator = EvaluationMetrics(task_type)
     metrics = {}
     
@@ -345,7 +357,6 @@ def calculate_global_metrics(
         y_pred_aggregated = []
         y_proba_aggregated = []
         
-        # Traitement des listes d'entrée
         for i, (y_true, y_pred) in enumerate(zip(y_true_all, y_pred_all)):
             try:
                 y_true_flat = safe_array_conversion(y_true)
@@ -355,7 +366,6 @@ def calculate_global_metrics(
                     y_true_aggregated.extend(y_true_flat)
                     y_pred_aggregated.extend(y_pred_flat)
                     
-                    # Agrégation des probabilités si disponibles
                     if y_proba_all and i < len(y_proba_all):
                         y_proba = y_proba_all[i]
                         if y_proba is not None:
@@ -409,14 +419,16 @@ def calculate_global_metrics(
             regression_metrics = evaluator.calculate_regression_metrics(y_true_decoded, y_pred_decoded)
             metrics.update(regression_metrics)
             
-        elif task_type == "unsupervised":
+        elif task_type == "clustering":
             if X_data is not None:
                 X_flat = safe_array_conversion(X_data)
                 if len(X_flat) == len(y_pred_array):
                     unsupervised_metrics = evaluator.calculate_unsupervised_metrics(X_flat, y_pred_array)
                     metrics.update(unsupervised_metrics)
+                else:
+                    metrics["error"] = f"Incohérence dimensions X_data={len(X_flat)}, labels={len(y_pred_array)}"
             else:
-                metrics["error"] = "Données X requises pour l'évaluation non supervisée"
+                metrics["error"] = "Données X requises pour l'évaluation clustering"
         
         else:
             metrics["error"] = f"Type de tâche non supporté: {task_type}"
@@ -425,7 +437,6 @@ def calculate_global_metrics(
         metrics["computation_time"] = time.time() - start_time
         metrics["success"] = True
         
-        # Messages d'erreur accumulés
         if evaluator.error_messages:
             metrics["calculation_warnings"] = evaluator.error_messages
         
@@ -436,7 +447,6 @@ def calculate_global_metrics(
         metrics["success"] = False
         logger.error(f"❌ Erreur critique calculate_global_metrics: {e}", exc_info=True)
     
-    # Nettoyage mémoire
     gc.collect()
     
     return metrics
@@ -449,7 +459,7 @@ def evaluate_single_train_test_split(
     label_encoder: Any = None
 ) -> Dict[str, Any]:
     """
-    Évalue un modèle sur un unique jeu de test (fallback si la CV échoue).
+    Évalue un modèle sur un unique jeu de test.
     
     Args:
         model: Modèle entraîné
@@ -461,6 +471,7 @@ def evaluate_single_train_test_split(
     Returns:
         Métriques d'évaluation
     """
+    task_type = 'clustering' if task_type == 'unsupervised' else task_type  # Harmonisation
     try:
         # Prédictions
         y_pred = model.predict(X_test)
@@ -475,7 +486,7 @@ def evaluate_single_train_test_split(
         # Calcul des métriques
         metrics = calculate_global_metrics(
             [y_test], [y_pred], [y_proba] if y_proba is not None else [],
-            task_type, label_encoder, X_data=X_test
+            task_type, label_encoder, X_data=X_test if task_type == 'clustering' else None
         )
         
         return metrics
@@ -486,7 +497,7 @@ def evaluate_single_train_test_split(
 
 def generate_evaluation_report(metrics: Dict[str, Any], model_name: str = "") -> Dict[str, Any]:
     """
-    Génère un rapport d'évaluation structuré et détaillé.
+    Génère un rapport d'évaluation structuré.
     
     Args:
         metrics: Métriques calculées
@@ -510,7 +521,8 @@ def generate_evaluation_report(metrics: Dict[str, Any], model_name: str = "") ->
             return report
         
         # Résumé selon le type de tâche
-        task_type = "classification"  # À détecter depuis les métriques
+        task_type = metrics.get("task_type", "classification")
+        task_type = 'clustering' if task_type == 'unsupervised' else task_type  # Harmonisation
         
         if "accuracy" in metrics:
             task_type = "classification"
@@ -519,7 +531,6 @@ def generate_evaluation_report(metrics: Dict[str, Any], model_name: str = "") ->
             report["summary"]["primary_score"] = metrics.get("accuracy", 0)
             report["summary"]["status"] = "SUCCESS"
             
-            # Recommandations pour la classification
             accuracy = metrics.get("accuracy", 0)
             if accuracy > 0.9:
                 report["recommendations"].append("Excellente performance - modèle très fiable")
@@ -535,7 +546,6 @@ def generate_evaluation_report(metrics: Dict[str, Any], model_name: str = "") ->
             report["summary"]["primary_score"] = metrics.get("r2", 0)
             report["summary"]["status"] = "SUCCESS"
             
-            # Recommandations pour la régression
             r2 = metrics.get("r2", 0)
             if r2 > 0.8:
                 report["recommendations"].append("Excellente performance - modèle très prédictif")
@@ -545,17 +555,23 @@ def generate_evaluation_report(metrics: Dict[str, Any], model_name: str = "") ->
                 report["recommendations"].append("Performance faible - revoir les features")
                 
         elif "silhouette_score" in metrics:
-            task_type = "unsupervised"
-            report["summary"]["task_type"] = "unsupervised"
+            task_type = "clustering"
+            report["summary"]["task_type"] = "clustering"
             report["summary"]["primary_metric"] = "silhouette_score"
             report["summary"]["primary_score"] = metrics.get("silhouette_score", 0)
             report["summary"]["status"] = "SUCCESS"
+            
+            silhouette = metrics.get("silhouette_score", 0)
+            if silhouette > 0.7:
+                report["recommendations"].append("Excellente séparation des clusters")
+            elif silhouette > 0.5:
+                report["recommendations"].append("Bonne séparation - clustering utilisable")
+            else:
+                report["recommendations"].append("Séparation faible - envisager autre algorithme")
         
-        # Informations générales
         report["summary"]["n_samples"] = metrics.get("n_samples", 0)
         report["summary"]["computation_time"] = metrics.get("computation_time", 0)
         
-        # Alertes
         if metrics.get("validation_warnings"):
             report["warnings"] = metrics["validation_warnings"]
         
@@ -568,38 +584,6 @@ def generate_evaluation_report(metrics: Dict[str, Any], model_name: str = "") ->
         report["summary"]["message"] = f"Erreur génération rapport: {str(e)}"
     
     return report
-
-def create_confusion_matrix_plot(confusion_matrix: List[List[int]], class_names: List[str] = None) -> str:
-    """
-    Crée une visualisation de matrice de confusion en base64.
-    
-    Args:
-        confusion_matrix: Matrice de confusion
-        class_names: Noms des classes
-    
-    Returns:
-        Image base64 encodée
-    """
-    try:
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(confusion_matrix, annot=True, fmt='d', cmap='Blues',
-                   xticklabels=class_names, yticklabels=class_names)
-        plt.title('Matrice de Confusion')
-        plt.ylabel('Vraies étiquettes')
-        plt.xlabel('Étiquettes prédites')
-        
-        # Conversion en base64
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight', dpi=100)
-        buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.read()).decode()
-        plt.close()
-        
-        return f"data:image/png;base64,{image_base64}"
-        
-    except Exception as e:
-        logger.error(f"Erreur création matrice confusion: {e}")
-        return ""
 
 def compare_models_performance(models_metrics: Dict[str, Dict]) -> Dict[str, Any]:
     """
@@ -634,7 +618,7 @@ def compare_models_performance(models_metrics: Dict[str, Dict]) -> Dict[str, Any
                 primary_metric = "r2"
                 break
             elif "silhouette_score" in metrics:
-                task_type = "unsupervised"
+                task_type = "clustering"
                 primary_metric = "silhouette_score"
                 break
         
@@ -649,7 +633,7 @@ def compare_models_performance(models_metrics: Dict[str, Dict]) -> Dict[str, Any
             if score is not None:
                 ranking.append((model_name, score, metrics))
         
-        # Tri selon la métrique (ordre décroissant sauf pour certaines métriques)
+        # Tri selon la métrique
         if primary_metric in ["mse", "mae", "rmse", "davies_bouldin_score"]:
             ranking.sort(key=lambda x: x[1])  # Croissant (plus petit = mieux)
         else:
@@ -665,12 +649,10 @@ def compare_models_performance(models_metrics: Dict[str, Dict]) -> Dict[str, Any
             for i, (name, score, metrics) in enumerate(ranking)
         ]
         
-        # Meilleur modèle
         if ranking:
             comparison["best_model"] = ranking[0][0]
             comparison["best_score"] = ranking[0][1]
         
-        # Métriques de comparaison
         comparison["task_type"] = task_type
         comparison["primary_metric"] = primary_metric
         
@@ -682,7 +664,6 @@ def compare_models_performance(models_metrics: Dict[str, Dict]) -> Dict[str, Any
     
     return comparison
 
-import psutil
 def get_system_metrics():
     """
     Retourne les métriques système utiles pour le suivi des ressources.

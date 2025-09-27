@@ -106,7 +106,7 @@ def estimate_training_time(df: pd.DataFrame, n_models: int, task_type: str,
         
         # Multiplicateurs selon les paramètres
         time_multipliers = {
-            'unsupervised': 1.2,
+            'clustering': 1.2,
             'classification': 1.5 if use_smote else 1.3,
             'regression': 1.4
         }
@@ -245,7 +245,7 @@ def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
     
     return validation
 
-# Initialisation robuste de l'état ML - AMÉLIORÉE
+# Initialisation robuste de l'état 
 def initialize_ml_config_state():
     """Initialise l'état de configuration ML de façon robuste"""
     defaults = {
@@ -327,8 +327,8 @@ def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
 def get_task_specific_models(task_type: str) -> List[str]:
     """Retourne les modèles disponibles pour un type de tâche spécifique"""
     try:
-        if task_type == 'unsupervised':
-            return list(MODEL_CATALOG.get('unsupervised', {}).keys())
+        if task_type == 'clustering':
+            return list(MODEL_CATALOG.get('clustering', {}).keys())
         elif task_type == 'regression':
             return list(MODEL_CATALOG.get('regression', {}).keys())
         else:  # classification par défaut
@@ -342,13 +342,13 @@ def get_default_models_for_task(task_type: str) -> List[str]:
     default_models = {
         'classification': ['RandomForest', 'XGBoost', 'LogisticRegression'],
         'regression': ['RandomForest', 'XGBoost', 'LinearRegression'],
-        'unsupervised': ['KMeans', 'DBSCAN', 'GaussianMixture']
+        'clustering': ['KMeans', 'DBSCAN', 'GaussianMixture']
     }
     available_models = get_task_specific_models(task_type)
     return [model for model in default_models.get(task_type, []) if model in available_models]
 
 # Interface principale
-st.title("⚙️ Configuration Détaillée de l'Expérience ML")
+st.title("⚙️ Configuration Détaillée de l'Expériences")
 
 # Vérification des données avec validation stricte
 if 'df' not in st.session_state or st.session_state.df is None:
@@ -439,7 +439,7 @@ if st.session_state.current_step == 1:
     }
     
     # Déterminer l'index initial basé sur l'état actuel
-    if st.session_state.task_type == 'unsupervised':
+    if st.session_state.task_type == 'clustering':
         current_task_idx = 2
     elif st.session_state.task_type == 'regression':
         current_task_idx = 1
@@ -461,7 +461,7 @@ if st.session_state.current_step == 1:
     task_mapping = {
         "Classification Supervisée": "classification",
         "Régression Supervisée": "regression", 
-        "Clustering Non Supervisé": "unsupervised"
+        "Clustering Non Supervisé": "clustering"
     }
     
     selected_task_type = task_mapping[task_selection]
@@ -471,7 +471,7 @@ if st.session_state.current_step == 1:
         st.info("🔄 Type de tâche modifié - réinitialisation des sélections...")
         
         # Reset des configurations qui ne sont plus valides
-        if selected_task_type == 'unsupervised':
+        if selected_task_type == 'clustering':
             st.session_state.target_column_for_ml_config = None
             st.session_state.preprocessing_choices['use_smote'] = False
             # Reset features pour clustering
@@ -772,7 +772,7 @@ elif st.session_state.current_step == 2:
         scale_help = {
             'classification': "Recommandé pour SVM, KNN, réseaux de neurones",
             'regression': "Recommandé pour la plupart des algorithmes", 
-            'unsupervised': "ESSENTIEL pour le clustering (KMeans, DBSCAN)"
+            'clustering': "ESSENTIEL pour le clustering (KMeans, DBSCAN)"
         }
         
         st.session_state.preprocessing_choices['scale_features'] = st.checkbox(
@@ -782,7 +782,7 @@ elif st.session_state.current_step == 2:
             help=scale_help.get(task_type, "Recommandé pour la plupart des algorithmes")
         )
         
-        if task_type == 'unsupervised' and not st.session_state.preprocessing_choices.get('scale_features', True):
+        if task_type == 'clustering' and not st.session_state.preprocessing_choices.get('scale_features', True):
             st.error("❌ **ATTENTION**: La normalisation est CRITIQUE pour le clustering!")
             st.info("Les algorithmes comme KMeans sont sensibles à l'échelle des variables")
         
@@ -831,7 +831,7 @@ elif st.session_state.current_step == 2:
             else:
                 st.info("🔒 Variable cible requise pour l'analyse de déséquilibre")
         
-        elif task_type == 'unsupervised':
+        elif task_type == 'clustering':
             st.subheader("🔍 Options de Clustering")
             
             st.info("""
@@ -900,7 +900,7 @@ elif st.session_state.current_step == 3:
                             st.caption(f"• Hyperparamètres: {param_count} disponibles")
                             
                         # Conseils spécifiques
-                        if task_type == 'unsupervised':
+                        if task_type == 'clustering':
                             if model_name == 'KMeans':
                                 st.caption("💡 **Conseil**: Excellent pour clusters sphériques de taille similaire")
                             elif model_name == 'DBSCAN':
@@ -918,7 +918,7 @@ elif st.session_state.current_step == 3:
         st.subheader("⚙️ Configuration Avancée")
         
         # Configuration différente selon le type de tâche
-        if task_type != 'unsupervised':
+        if task_type != 'clustering':
             # Taille du jeu de test avec validation - UNIQUEMENT pour supervisé
             test_split = st.slider(
                 "Jeu de test (%)",
@@ -950,7 +950,7 @@ elif st.session_state.current_step == 3:
             st.warning("⏰ Temps d'entraînement multiplié par 3-5x")
             
             # Options d'optimisation adaptées
-            if task_type == 'unsupervised':
+            if task_type == 'clustering':
                 optimization_method = st.selectbox(
                     "Méthode d'optimisation",
                     options=['Silhouette Score', 'Davies-Bouldin'],
@@ -994,7 +994,7 @@ elif st.session_state.current_step == 3:
                     st.warning(f"• {warning}")
         
         # Avertissements spécifiques
-        if task_type == 'unsupervised' and len(selected_models) > 3:
+        if task_type == 'clustering' and len(selected_models) > 3:
             st.warning("⚠️ Le clustering peut être long avec beaucoup de données")
 
 # Étape 4: Lancement
@@ -1013,14 +1013,14 @@ elif st.session_state.current_step == 4:
     
     if not st.session_state.feature_list_for_ml_config:
         config_issues.append("Aucune variable explicative sélectionnée")
-    elif len(st.session_state.feature_list_for_ml_config) < 2 and task_type == 'unsupervised':
+    elif len(st.session_state.feature_list_for_ml_config) < 2 and task_type == 'clustering':
         config_issues.append("Au moins 2 variables requises pour le clustering")
     
     if not st.session_state.selected_models_for_training:
         config_issues.append("Aucun modèle sélectionné")
     
     # Vérifications de qualité spécifiques
-    if task_type == 'unsupervised':
+    if task_type == 'clustering':
         if not st.session_state.preprocessing_choices.get('scale_features', True):
             config_warnings.append("⚠️ La normalisation est CRITIQUE pour le clustering!")
         
@@ -1061,10 +1061,10 @@ elif st.session_state.current_step == 4:
             with col1:
                 st.markdown("**📊 Configuration Données**")
                 st.write(f"• Type: {task_type.upper()}")
-                if task_type != 'unsupervised':
+                if task_type != 'clustering':
                     st.write(f"• Cible: `{st.session_state.target_column_for_ml_config}`")
                 st.write(f"• Features: {len(st.session_state.feature_list_for_ml_config)}")
-                if task_type != 'unsupervised':
+                if task_type != 'clustering':
                     st.write(f"• Test: {st.session_state.test_split_for_ml_config}%")
                 else:
                     st.write("• Test: 0% (clustering)")
@@ -1110,7 +1110,7 @@ elif st.session_state.current_step == 4:
                 'target_column': st.session_state.target_column_for_ml_config,
                 'model_names': st.session_state.selected_models_for_training,
                 'task_type': task_type,
-                'test_size': st.session_state.test_split_for_ml_config / 100 if task_type != 'unsupervised' else 0.0,
+                'test_size': st.session_state.test_split_for_ml_config / 100 if task_type != 'clustering' else 0.0,
                 'optimize': st.session_state.optimize_hp_for_ml_config,
                 'feature_list': st.session_state.feature_list_for_ml_config,
                 'use_smote': st.session_state.preprocessing_choices.get('use_smote', False),
@@ -1187,7 +1187,7 @@ elif st.session_state.current_step == 4:
                             best_model = max(successful_models, key=lambda x: x.get('metrics', {}).get('r2', -999))
                             best_score = best_model.get('metrics', {}).get('r2', 0)
                             st.info(f"🏆 Meilleur modèle: **{best_model['model_name']}** (R²: {best_score:.3f})")
-                        else:  # unsupervised
+                        else:  # clustering
                             best_model = max(successful_models, key=lambda x: x.get('metrics', {}).get('silhouette_score', -999))
                             best_score = best_model.get('metrics', {}).get('silhouette_score', 0)
                             st.info(f"🏆 Meilleur modèle: **{best_model['model_name']}** (Silhouette: {best_score:.3f})")

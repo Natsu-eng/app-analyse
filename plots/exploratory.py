@@ -1,3 +1,4 @@
+from matplotlib import pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -10,6 +11,7 @@ import streamlit as st
 from typing import Dict, List, Optional, Tuple, Union
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import seaborn as sns
 from . import templates  # Fichier de templates
 
 # Configuration du logging
@@ -137,16 +139,13 @@ def plot_cardinality_overview(_df: pd.DataFrame, column_types: Dict[str, List]) 
 
         cardinality = _df[cat_text_cols].nunique().sort_values(ascending=False)
         
-        fig = px.bar(
-            x=cardinality.index, 
-            y=cardinality.values,
-            labels={'x': 'Colonnes', 'y': 'Nombre de valeurs uniques'},
-            title="Cardinalité des variables non-numériques"
-        )
-        fig.update_layout(
-            template=templates.DATALAB_TEMPLATE,
-            xaxis_tickangle=45
-        )
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.barplot(x=cardinality.index, y=cardinality.values, ax=ax)
+        ax.set_title("Cardinalité des Variables Non-Numériques")
+        ax.set_xlabel("Colonnes")
+        ax.set_ylabel("Nombre de Valeurs Uniques")
+        ax.tick_params(axis='x', rotation=45)
+        
         logger.debug("Graphique de cardinalité généré")
         return fig
         
