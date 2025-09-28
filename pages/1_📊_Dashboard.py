@@ -376,7 +376,7 @@ try:
     overview_metrics = compute_global_metrics(df)
     fig = plot_overview_metrics(overview_metrics)
     if fig:
-        st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
+        st.plotly_chart(fig, width='stretch', config={'responsive': True})
     else:
         st.info("📊 Métriques globales non disponibles")
 except Exception as e:
@@ -403,7 +403,7 @@ with tabs[0]:
         try:
             missing_fig = plot_missing_values_overview(df)
             if missing_fig:
-                st.plotly_chart(missing_fig, use_container_width=True, config={'responsive': True})
+                st.plotly_chart(missing_fig, width='stretch', config={'responsive': True})
             else:
                 st.success("✅ Aucune valeur manquante")
         except Exception as e:
@@ -414,7 +414,7 @@ with tabs[0]:
         try:
             cardinality_fig = plot_cardinality_overview(df, column_types)
             if cardinality_fig:
-                st.plotly_chart(cardinality_fig, use_container_width=True, config={'responsive': True})
+                st.plotly_chart(cardinality_fig, width='stretch', config={'responsive': True})
             else:
                 st.info("📊 Cardinalité uniforme")
         except Exception as e:
@@ -469,7 +469,7 @@ with tabs[1]:
                         with st.spinner("📊 Génération du graphique..."):
                             fig = plot_distribution(col_data, selected_col)
                             if fig:
-                                st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
+                                st.plotly_chart(fig, width='stretch', config={'responsive': True})
                             else:
                                 st.info("Graphique non disponible")
                     else:
@@ -482,7 +482,7 @@ with tabs[1]:
                             with col_table:
                                 df_display = value_counts.reset_index()
                                 df_display.columns = ['Valeur', 'Count']
-                                st.dataframe(df_display, height=400, use_container_width=True)
+                                st.dataframe(df_display, height=400, width='stretch')
                             
                             with col_chart:
                                 import plotly.express as px
@@ -493,7 +493,7 @@ with tabs[1]:
                                     title=f"Distribution de {selected_col}"
                                 )
                                 fig.update_layout(template="plotly_white", height=400)
-                                st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
+                                st.plotly_chart(fig, width='stretch', config={'responsive': True})
                         else:
                             st.info("Aucune donnée à afficher")
                             
@@ -548,7 +548,7 @@ with tabs[2]:
                     with st.spinner("📊 Génération de l'analyse bivariée..."):
                         biv_fig = plot_bivariate_analysis(sample_df, var1, var2, type1, type2)
                         if biv_fig:
-                            st.plotly_chart(biv_fig, use_container_width=True, config={'responsive': True})
+                            st.plotly_chart(biv_fig, width='stretch', config={'responsive': True})
                         else:
                             st.info("Graphique non disponible pour cette combinaison")
                 else:
@@ -640,7 +640,7 @@ with tabs[3]:
                     )
                 
                 if corr_fig:
-                    st.plotly_chart(corr_fig, use_container_width=True, config={'responsive': True})
+                    st.plotly_chart(corr_fig, width='stretch', config={'responsive': True})
                     st.success(f"✅ Matrice générée avec {len(used_cols)} variables")
                 else:
                     st.warning("❌ Impossible de générer la matrice")
@@ -658,7 +658,7 @@ with tabs[3]:
                     if len(numeric_cols) > 1:
                         corr_matrix = sample_df[numeric_cols].corr()
                         fig = px.imshow(corr_matrix, text_auto=".2f", aspect="auto")
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
                     else:
                         st.info("Pas assez de variables numériques")
                 except Exception as fallback_e:
@@ -708,7 +708,7 @@ with tabs[4]:
         st.dataframe(
             display_df_truncated,
             height=400,
-            use_container_width=True
+            width='stretch'
         )
         
         # Affichage des types de données si demandé
@@ -729,7 +729,7 @@ with tabs[4]:
                     })
                 
                 dtypes_df = pd.DataFrame(dtypes_info)
-                st.dataframe(dtypes_df, use_container_width=True)
+                st.dataframe(dtypes_df, width='stretch')
         
         # Informations complémentaires
         info_col1, info_col2, info_col3 = st.columns(3)
@@ -774,7 +774,7 @@ with tabs[4]:
         try:
             st.info("🔄 Tentative de chargement simplifié...")
             fallback_df = compute_if_dask(df.head(50))
-            st.dataframe(fallback_df, height=300, use_container_width=True)
+            st.dataframe(fallback_df, height=300, width='stretch')
             st.caption(f"📊 Affichage de secours: 50 premières lignes sur {compute_if_dask(df.shape[0]):,} total")
         except Exception as fallback_error:
             st.error("🚨 Impossible d'afficher les données")
@@ -916,7 +916,7 @@ with tabs[5]:
     if st.session_state.rename_list:
         st.markdown("**📋 Renommages planifiés:**")
         rename_df = pd.DataFrame(st.session_state.rename_list, columns=["Ancien nom", "Nouveau nom"])
-        st.dataframe(rename_df, use_container_width=True)
+        st.dataframe(rename_df, width='stretch')
         
         if st.button("✅ Appliquer tous les renommages", type="primary", key="apply_renames"):
             try:

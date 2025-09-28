@@ -1,3 +1,8 @@
+"""
+Module d'entraînement robuste pour le machine learning.
+Supporte l'apprentissage supervisé et non-supervisé avec gestion MLOps avancée.
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, StratifiedKFold, KFold
@@ -8,21 +13,32 @@ import os
 import time
 import gc
 import psutil
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 import warnings
 from sklearn.exceptions import ConvergenceWarning
+import json
+from datetime import datetime
 
 # Configuration des warnings
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # Import des modules de l'application
-from ml.catalog import get_model_config
-from ml.data_preprocessing import create_preprocessor, safe_label_encode
-from ml.evaluation.metrics_calculation import EvaluationMetrics
-
-from utils.data_analysis import auto_detect_column_types
-from utils.logging_config import get_logger
+try:
+    from ml.catalog import get_model_config
+    from ml.data_preprocessing import create_preprocessor, safe_label_encode, validate_preprocessor
+    from ml.evaluation.metrics_calculation import EvaluationMetrics
+    from utils.data_analysis import auto_detect_column_types
+    from utils.logging_config import get_logger
+except ImportError as e:
+    print(f"Warning: Some imports failed - {e}")
+    # Fallback pour les tests
+    def get_model_config(*args, **kwargs): return None
+    def auto_detect_column_types(*args, **kwargs): return {}
+    def get_logger(name): 
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        return logging.getLogger(name)
 
 logger = get_logger(__name__)
 
@@ -30,28 +46,31 @@ logger = get_logger(__name__)
 MAX_TRAINING_TIME = 3600  # 1 heure maximum par modèle
 MEMORY_LIMIT_MB = 4000    # 4GB mémoire limite
 MIN_SAMPLES_REQUIRED = 10
+MAX_FEATURES = 1000       # Maximum de features pour éviter l'explosion dimensionnelle
 
 class TrainingMonitor:
-    """Monitor pour suivre la progression et les ressources pendant l'entraînement"""
+    """Monitor pour suivre la progression et les ressources pendant l'entraînement."""
     
     def __init__(self):
         self.start_time = None
         self.model_start_time = None
         self.memory_usage = []
+        self.current_model = None
         
-    def start_training(self):
-        """Démarre le monitoring de l'entraînement"""
+    def start_training(self) -> None:
+        """Démarre le monitoring de l'entraînement."""
         self.start_time = time.time()
         self.memory_usage = []
-        logger.info("Début du monitoring de l'entraînement")
+        logger.info("🚀 Début du monitoring de l'entraînement")
         
-    def start_model(self, model_name: str):
-        """Démarre le monitoring pour un modèle spécifique"""
+    def start_model(self, model_name: str) -> None:
+        """Démarre le monitoring pour un modèle spécifique."""
         self.model_start_time = time.time()
-        logger.info(f"Début de l'entraînement pour: {model_name}")
+        self.current_model = model_name
+        logger.info(f"🔧 Début de l'entraînement pour: {model_name}")
         
     def check_resources(self) -> Dict[str, Any]:
-        """Vérifie l'utilisation des ressources"""
+        """Vérifie l'utilisation des ressources système."""
         try:
             memory = psutil.virtual_memory()
             cpu_percent = psutil.cpu_percent(interval=1)
@@ -60,36 +79,48 @@ class TrainingMonitor:
                 'memory_percent': memory.percent,
                 'memory_used_mb': memory.used / (1024 * 1024),
                 'cpu_percent': cpu_percent,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'model': self.current_model
             }
             
             self.memory_usage.append(resource_info)
             
-            # Alerte si utilisation élevée
+            # Alertes si utilisation élevée
             if memory.percent > 85:
-                logger.warning(f"Utilisation mémoire élevée: {memory.percent:.1f}%")
+                logger.warning(f"⚠️ Utilisation mémoire élevée: {memory.percent:.1f}%")
             if cpu_percent > 90:
-                logger.warning(f"Utilisation CPU élevée: {cpu_percent:.1f}%")
+                logger.warning(f"⚠️ Utilisation CPU élevée: {cpu_percent:.1f}%")
                 
             return resource_info
             
         except Exception as e:
-            logger.error(f"Erreur lors de la vérification des ressources: {e}")
+            logger.error(f"❌ Erreur vérification ressources: {e}")
             return {}
     
     def get_model_duration(self) -> float:
-        """Retourne la durée d'entraînement du modèle actuel"""
+        """Retourne la durée d'entraînement du modèle actuel."""
         if self.model_start_time:
             return time.time() - self.model_start_time
         return 0.0
     
     def get_total_duration(self) -> float:
-        """Retourne la durée totale d'entraînement"""
+        """Retourne la durée totale d'entraînement."""
         if self.start_time:
             return time.time() - self.start_time
         return 0.0
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """Retourne un résumé du monitoring."""
+        return {
+            'total_duration': self.get_total_duration(),
+            'memory_samples': len(self.memory_usage),
+            'peak_memory': max([m.get('memory_percent', 0) for m in self.memory_usage]) if self.memory_usage else 0,
+            'current_model': self.current_model
+        }
 
-def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dict[str, Any]:
+def validate_training_data(X: pd.DataFrame, 
+                          y: Optional[pd.Series], 
+                          task_type: str) -> Dict[str, Any]:
     """
     Valide les données d'entraînement de façon robuste.
     
@@ -97,7 +128,7 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
         X: Features
         y: Target (peut être None pour unsupervised)
         task_type: Type de tâche ML
-    
+        
     Returns:
         Dict avec les résultats de validation
     """
@@ -106,11 +137,12 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
         "issues": [],
         "warnings": [],
         "samples_count": len(X) if X is not None else 0,
-        "features_count": len(X.columns) if hasattr(X, 'columns') else (X.shape[1] if X is not None else 0)
+        "features_count": len(X.columns) if hasattr(X, 'columns') else (X.shape[1] if X is not None else 0),
+        "data_quality": {}
     }
     
     try:
-        # Vérification des dimensions
+        # Vérification des dimensions de base
         if X is None or len(X) == 0:
             validation["is_valid"] = False
             validation["issues"].append("Dataset X vide ou None")
@@ -124,12 +156,36 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
             validation["is_valid"] = False
             validation["issues"].append("Aucune feature disponible")
         
+        # Vérification de la mémoire
+        try:
+            if hasattr(X, 'memory_usage'):
+                x_memory = X.memory_usage(deep=True).sum() / (1024 * 1024)  # MB
+                validation["data_quality"]["memory_usage_mb"] = x_memory
+                if x_memory > MEMORY_LIMIT_MB:
+                    validation["warnings"].append(f"Dataset volumineux ({x_memory:.1f}MB)")
+        except Exception as e:
+            logger.debug(f"Erreur calcul mémoire: {e}")
+        
+        # Vérification des valeurs manquantes
+        missing_stats = X.isna().sum()
+        total_missing = missing_stats.sum()
+        missing_ratio = total_missing / (X.shape[0] * X.shape[1]) if X.size > 0 else 0
+        
+        validation["data_quality"]["total_missing"] = int(total_missing)
+        validation["data_quality"]["missing_ratio"] = float(missing_ratio)
+        
+        if missing_ratio > 0.5:
+            validation["warnings"].append(f"Ratio de valeurs manquantes élevé: {missing_ratio:.1%}")
+        
         # Vérification spécifique au non-supervisé
         if task_type == 'clustering':
             if y is not None:
                 validation["warnings"].append("Target ignorée pour le clustering")
+            
             # Pour le clustering, vérifier qu'on a assez de features numériques
             numeric_features = X.select_dtypes(include=[np.number]).shape[1]
+            validation["data_quality"]["numeric_features"] = numeric_features
+            
             if numeric_features < 2:
                 validation["warnings"].append("Peu de features numériques pour le clustering")
         
@@ -137,9 +193,11 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
         elif y is not None:
             if len(y) != len(X):
                 validation["is_valid"] = False
-                validation["issues"].append("Dimensions X et y incohérentes")
+                validation["issues"].append(f"Dimensions X et y incohérentes: {len(X)} vs {len(y)}")
                 
             valid_target_count = y.notna().sum() if hasattr(y, 'notna') else np.sum(~np.isnan(y))
+            validation["data_quality"]["valid_target_count"] = int(valid_target_count)
+            
             if valid_target_count < MIN_SAMPLES_REQUIRED:
                 validation["is_valid"] = False
                 validation["issues"].append(f"Trop peu de targets valides ({valid_target_count})")
@@ -147,33 +205,30 @@ def validate_training_data(X: pd.DataFrame, y: pd.Series, task_type: str) -> Dic
             # Pour la classification, vérifier le nombre de classes
             if task_type == 'classification':
                 unique_classes = np.unique(y.dropna()) if hasattr(y, 'dropna') else np.unique(y[~np.isnan(y)])
-                if len(unique_classes) < 2:
+                n_classes = len(unique_classes)
+                validation["data_quality"]["n_classes"] = n_classes
+                
+                if n_classes < 2:
                     validation["is_valid"] = False
                     validation["issues"].append("Moins de 2 classes distinctes")
-                elif len(unique_classes) > 100:
+                elif n_classes > 100:
                     validation["warnings"].append("Plus de 100 classes - vérifiez la variable cible")
-        
-        # Vérification de la mémoire
-        try:
-            if hasattr(X, 'memory_usage'):
-                x_memory = X.memory_usage(deep=True).sum() / (1024 * 1024)  # MB
-                if x_memory > MEMORY_LIMIT_MB:
-                    validation["warnings"].append(f"Dataset volumineux ({x_memory:.1f}MB)")
-        except:
-            pass
             
+        logger.info(f"✅ Validation données: {validation['samples_count']} échantillons, "
+                   f"{validation['features_count']} features, {len(validation['issues'])} issues")
+        
     except Exception as e:
         validation["is_valid"] = False
         validation["issues"].append(f"Erreur de validation: {str(e)}")
-        logger.error(f"Validation error: {e}")
+        logger.error(f"❌ Validation error: {e}")
     
     return validation
 
 def create_leak_free_pipeline(
     model_name: str, 
     task_type: str, 
-    column_types: Dict,
-    preprocessing_choices: Dict,
+    column_types: Dict[str, List[str]],
+    preprocessing_choices: Dict[str, Any],
     use_smote: bool = False,
     optimize_hyperparams: bool = False
 ) -> Tuple[Optional[Pipeline], Optional[Dict]]:
@@ -187,7 +242,7 @@ def create_leak_free_pipeline(
         preprocessing_choices: Options de prétraitement
         use_smote: Utiliser SMOTE (seulement si supervisé)
         optimize_hyperparams: Optimiser les hyperparamètres
-    
+        
     Returns:
         Tuple (pipeline, param_grid)
     """
@@ -195,39 +250,48 @@ def create_leak_free_pipeline(
         # Récupération de la configuration du modèle
         model_config = get_model_config(task_type, model_name)
         if not model_config:
-            logger.error(f"Configuration non trouvée pour {model_name} ({task_type})")
+            logger.error(f"❌ Configuration non trouvée pour {model_name} ({task_type})")
             return None, None
             
         model = model_config["model"]
         param_grid = {}
+        
         if optimize_hyperparams and "params" in model_config:
             # Préfixer les paramètres avec 'model__' pour le pipeline
             param_grid = {f"model__{k}": v for k, v in model_config["params"].items()}
+            logger.debug(f"Grille paramètres pour {model_name}: {len(param_grid)} combinaisons")
         
-        # Créer le préprocesseur - ATTENTION: Sera appliqué dans le pipeline
+        # Créer le préprocesseur - intégré dans le pipeline pour éviter le data leakage
         preprocessor = create_preprocessor(preprocessing_choices, column_types)
         if preprocessor is None:
-            logger.error(f"Échec création préprocesseur pour {model_name}")
+            logger.error(f"❌ Échec création préprocesseur pour {model_name}")
             return None, None
+        
+        # Validation du préprocesseur
+        validation_result = validate_preprocessor(preprocessor, pd.DataFrame({
+            col: [0] for cols in column_types.values() for col in cols
+        }))
+        
+        if not validation_result["is_valid"]:
+            logger.warning(f"⚠️ Préprocesseur avec issues: {validation_result['issues']}")
         
         # Construction du pipeline SANS DATA LEAKAGE
         pipeline_steps = [('preprocessor', preprocessor)]
         
-        # SMOTE seulement pour classification supervisée ET appliqué correctement
+        # SMOTE seulement pour classification supervisée
         if use_smote and task_type == 'classification':
-            # SMOTE sera appliqué APRÈS preprocessing mais AVANT modèle
-            # et seulement sur les données d'entraînement dans chaque fold
             pipeline_steps.append(('smote', SMOTE(random_state=42, k_neighbors=3)))
+            logger.debug("SMOTE ajouté au pipeline")
         
         pipeline_steps.append(('model', model))
         
         pipeline = Pipeline(pipeline_steps)
         
-        logger.info(f"Pipeline leak-free créé pour {model_name} avec {len(pipeline_steps)} étapes")
+        logger.info(f"✅ Pipeline leak-free créé pour {model_name} avec {len(pipeline_steps)} étapes")
         return pipeline, param_grid
         
     except Exception as e:
-        logger.error(f"Erreur création pipeline pour {model_name}: {e}")
+        logger.error(f"❌ Erreur création pipeline pour {model_name}: {e}")
         return None, None
 
 def train_single_model_supervised(
@@ -252,7 +316,7 @@ def train_single_model_supervised(
         param_grid: Grille d'hyperparamètres
         task_type: Type de tâche
         monitor: Monitor de progression
-    
+        
     Returns:
         Résultats de l'entraînement
     """
@@ -262,7 +326,8 @@ def train_single_model_supervised(
         "model": None,
         "training_time": 0,
         "error": None,
-        "best_params": None
+        "best_params": None,
+        "cv_scores": None
     }
     
     start_time = time.time()
@@ -271,17 +336,30 @@ def train_single_model_supervised(
         if monitor:
             monitor.start_model(model_name)
         
-        # Configuration de la cross-validation
+        # Configuration de la cross-validation adaptée
         if task_type == 'classification':
-            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+            cv = StratifiedKFold(n_splits=min(5, len(np.unique(y_train))), shuffle=True, random_state=42)
             scoring = 'accuracy'
         else:  # regression
-            cv = KFold(n_splits=3, shuffle=True, random_state=42)
+            cv = KFold(n_splits=5, shuffle=True, random_state=42)
             scoring = 'r2'
         
         # Optimisation des hyperparamètres avec CV propre
         if param_grid and len(param_grid) > 0:
-            logger.info(f"Optimisation hyperparamètres pour {model_name}")
+            logger.info(f"🔍 Optimisation hyperparamètres pour {model_name}")
+            
+            # Limiter le nombre de combinaisons pour les gros datasets
+            total_combinations = np.prod([len(v) for v in param_grid.values()])
+            if total_combinations > 50:
+                logger.warning(f"Grille trop large ({total_combinations} combinaisons), limitation automatique")
+                # Prendre les 2 premières valeurs pour chaque paramètre
+                limited_param_grid = {}
+                for k, v in param_grid.items():
+                    if len(v) > 2:
+                        limited_param_grid[k] = v[:2]
+                    else:
+                        limited_param_grid[k] = v
+                param_grid = limited_param_grid
             
             grid_search = GridSearchCV(
                 pipeline,
@@ -289,7 +367,8 @@ def train_single_model_supervised(
                 cv=cv,
                 scoring=scoring,
                 n_jobs=1,  # Éviter parallélisme pour stabilité
-                verbose=0
+                verbose=0,
+                error_score='raise'
             )
             
             # Entraînement avec optimisation SUR TRAIN SEULEMENT
@@ -297,17 +376,26 @@ def train_single_model_supervised(
             
             result["model"] = grid_search.best_estimator_
             result["best_params"] = grid_search.best_params_
+            result["cv_scores"] = {
+                'mean': grid_search.best_score_,
+                'std': grid_search.cv_results_['std_test_score'][grid_search.best_index_]
+            }
             result["success"] = True
             
-            logger.info(f"Optimisation terminée pour {model_name}")
+            logger.info(f"✅ Optimisation terminée pour {model_name} - score: {grid_search.best_score_:.3f}")
             
         else:
-            # Entraînement simple avec validation croisée pour vérifier
+            # Entraînement simple avec validation croisée pour évaluation
             try:
                 cv_scores = cross_val_score(pipeline, X_train, y_train, cv=cv, scoring=scoring)
-                logger.info(f"CV scores pour {model_name}: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
+                result["cv_scores"] = {
+                    'mean': cv_scores.mean(),
+                    'std': cv_scores.std()
+                }
+                logger.info(f"📊 CV scores pour {model_name}: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
             except Exception as cv_error:
-                logger.warning(f"CV échouée pour {model_name}: {cv_error}")
+                logger.warning(f"⚠️ CV échouée pour {model_name}: {cv_error}")
+                result["cv_scores"] = None
             
             # Entraînement final sur toutes les données train
             pipeline.fit(X_train, y_train)
@@ -319,13 +407,14 @@ def train_single_model_supervised(
         # Vérification des ressources
         if monitor:
             resource_info = monitor.check_resources()
-            logger.info(f"{model_name} entraîné en {result['training_time']:.2f}s - RAM: {resource_info.get('memory_percent', 0):.1f}%")
+            logger.info(f"✅ {model_name} entraîné en {result['training_time']:.2f}s - "
+                       f"RAM: {resource_info.get('memory_percent', 0):.1f}%")
         
     except Exception as e:
         result["success"] = False
         result["error"] = str(e)
         result["training_time"] = time.time() - start_time
-        logger.error(f"Erreur entraînement {model_name}: {e}")
+        logger.error(f"❌ Erreur entraînement {model_name}: {e}")
     
     return result
 
@@ -345,7 +434,7 @@ def train_single_model_unsupervised(
         X: Données (pas de split train/test pour clustering)
         param_grid: Grille d'hyperparamètres
         monitor: Monitor de progression
-    
+        
     Returns:
         Résultats de l'entraînement
     """
@@ -365,29 +454,27 @@ def train_single_model_unsupervised(
             monitor.start_model(model_name)
         
         # Pour le clustering, pas de train/test split classique
-        # On utilise tout le dataset mais on peut faire de l'optimisation
-        
         if param_grid and len(param_grid) > 0:
-            logger.info(f"Optimisation hyperparamètres clustering pour {model_name}")
+            logger.info(f"🔍 Optimisation hyperparamètres clustering pour {model_name}")
             
             # Pour le clustering, on utilise silhouette score pour optimiser
             grid_search = GridSearchCV(
                 pipeline,
                 param_grid,
                 cv=3,  # Cross-validation même pour clustering (pour robustesse)
-                scoring='silhouette',
+                scoring='silhouette_score' if hasattr(pipeline, 'fit_predict') else 'silhouette',
                 n_jobs=1,
                 verbose=0
             )
             
-            grid_search.fit_predict(X)
+            grid_search.fit(X)
             result["model"] = grid_search.best_estimator_
             result["best_params"] = grid_search.best_params_
             result["success"] = True
             
         else:
             # Entraînement simple
-            pipeline.fit_predict(X)
+            pipeline.fit(X)
             result["model"] = pipeline
             result["success"] = True
         
@@ -395,13 +482,13 @@ def train_single_model_unsupervised(
         
         if monitor:
             resource_info = monitor.check_resources()
-            logger.info(f"Clustering {model_name} terminé en {result['training_time']:.2f}s")
+            logger.info(f"✅ Clustering {model_name} terminé en {result['training_time']:.2f}s")
         
     except Exception as e:
         result["success"] = False
         result["error"] = str(e)
         result["training_time"] = time.time() - start_time
-        logger.error(f"Erreur clustering {model_name}: {e}")
+        logger.error(f"❌ Erreur clustering {model_name}: {e}")
     
     return result
 
@@ -423,7 +510,7 @@ def evaluate_model_with_metrics_calculator(
         task_type: Type de tâche
         label_encoder: Encodeur de labels
         X_data: Données complètes (pour clustering)
-    
+        
     Returns:
         Métriques d'évaluation
     """
@@ -435,11 +522,17 @@ def evaluate_model_with_metrics_calculator(
             if X_data is None:
                 return {"error": "Données X requises pour l'évaluation non supervisée"}
             
-            cluster_labels = model.fit_predict(X_data)
+            # Prédiction des clusters
+            if hasattr(model, 'predict'):
+                cluster_labels = model.predict(X_data)
+            elif hasattr(model, 'labels_'):
+                cluster_labels = model.labels_
+            else:
+                cluster_labels = model.fit_predict(X_data)
             
             # Calcul des métriques de clustering
             metrics = metrics_calculator.calculate_unsupervised_metrics(X_data.values, cluster_labels)
-            metrics['n_clusters'] = len(np.unique(cluster_labels))
+            metrics['n_clusters'] = len(np.unique(cluster_labels[~np.isnan(cluster_labels)]))
             metrics['task_type'] = task_type
             metrics['n_samples'] = len(X_data)
             
@@ -452,7 +545,7 @@ def evaluate_model_with_metrics_calculator(
                 try:
                     y_proba = model.predict_proba(X_test)
                 except Exception as e:
-                    logger.warning(f"Predict_proba non disponible: {e}")
+                    logger.warning(f"⚠️ Predict_proba non disponible: {e}")
             
             if task_type == 'classification':
                 metrics = metrics_calculator.calculate_classification_metrics(
@@ -467,14 +560,14 @@ def evaluate_model_with_metrics_calculator(
             metrics['n_samples'] = len(X_test)
         
         # Ajouter les messages d'avertissement si présents
-        if metrics_calculator.error_messages:
+        if hasattr(metrics_calculator, 'error_messages') and metrics_calculator.error_messages:
             metrics['calculation_warnings'] = metrics_calculator.error_messages
         
         metrics['success'] = True
         return metrics
         
     except Exception as e:
-        logger.error(f"Erreur évaluation avec EvaluationMetrics: {e}")
+        logger.error(f"❌ Erreur évaluation avec EvaluationMetrics: {e}")
         return {
             "error": f"Erreur évaluation: {str(e)}",
             "success": False,
@@ -505,7 +598,7 @@ def train_models(
         feature_list: Liste des features à utiliser
         use_smote: Utiliser SMOTE (seulement pour classification)
         preprocessing_choices: Options de prétraitement
-    
+        
     Returns:
         Liste des résultats d'entraînement
     """
@@ -515,38 +608,54 @@ def train_models(
     monitor.start_training()
     
     # Validation et préparation des paramètres
-    task_type = 'clustering' if task_type == 'unsupervised' else task_type  # Harmonisation
+    task_type = task_type.lower()
+    if task_type == 'unsupervised':
+        task_type = 'clustering'
+        
     if task_type == 'clustering':
         target_column = None
         use_smote = False
         test_size = 0.0  # Pas de split pour clustering
     
+    logger.info(f"🎯 Début entraînement - Type: {task_type}, Modèles: {len(model_names)}, "
+               f"Target: {target_column}")
+    
+    # Préparation des features
     if not feature_list:
-        if target_column:
+        if target_column and target_column in df.columns:
             feature_list = [col for col in df.columns if col != target_column]
         else:
             feature_list = list(df.columns)
     
+    # Limiter le nombre de features pour éviter l'explosion dimensionnelle
+    if len(feature_list) > MAX_FEATURES:
+        logger.warning(f"⚠️ Trop de features ({len(feature_list)}), limitation à {MAX_FEATURES}")
+        feature_list = feature_list[:MAX_FEATURES]
+    
+    # Configuration du preprocessing par défaut
     if not preprocessing_choices:
         preprocessing_choices = {
             'numeric_imputation': 'mean',
             'categorical_imputation': 'most_frequent',
             'remove_constant_cols': True,
             'remove_identifier_cols': True,
-            'scale_features': True  # Important pour clustering
+            'scale_features': True,
+            'scaling_method': 'standard',
+            'encoding_method': 'onehot'
         }
     
     # Création du dossier de sortie
     os.makedirs("models_output", exist_ok=True)
+    os.makedirs("training_logs", exist_ok=True)
     
     try:
         # Préparation des données
-        logger.info("Préparation des données...")
+        logger.info("📊 Préparation des données...")
         
         X = df[feature_list].copy() if df is not None else None
-        if X is None:
-            logger.error("DataFrame d'entrée est None")
-            return [{"model_name": "Validation", "metrics": {"error": "DataFrame d'entrée est None"}}]
+        if X is None or len(X) == 0:
+            logger.error("❌ DataFrame d'entrée vide ou None")
+            return [{"model_name": "Validation", "metrics": {"error": "DataFrame d'entrée vide ou None"}}]
         
         # Gestion de la target selon le type de tâche
         y = None
@@ -555,6 +664,10 @@ def train_models(
         encoding_map = None
         
         if task_type != 'clustering' and target_column:
+            if target_column not in df.columns:
+                logger.error(f"❌ Colonne cible '{target_column}' non trouvée")
+                return [{"model_name": "Validation", "metrics": {"error": f"Target '{target_column}' non trouvée"}}]
+                
             y_raw = df[target_column].copy()
             y_encoded, label_encoder, encoding_map = safe_label_encode(y_raw)
             y = pd.Series(y_encoded, index=y_raw.index, name=target_column)
@@ -563,14 +676,14 @@ def train_models(
         data_validation = validate_training_data(X, y, task_type)
         if not data_validation["is_valid"]:
             error_msg = f"Données invalides: {', '.join(data_validation['issues'])}"
-            logger.error(error_msg)
+            logger.error(f"❌ {error_msg}")
             return [{"model_name": "Validation", "metrics": {"error": error_msg}}]
         
         # Affichage des warnings
         for warning in data_validation["warnings"]:
-            logger.warning(warning)
+            logger.warning(f"⚠️ {warning}")
         
-        # Détection des types de colonnes AVANT le split (pas de leakage car pas de calcul de stats)
+        # Détection des types de colonnes AVANT le split (pas de leakage)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             column_types = auto_detect_column_types(X)
@@ -587,23 +700,23 @@ def train_models(
                     random_state=42, 
                     stratify=stratification
                 )
-                logger.info(f"Données splittées: train={len(X_train)}, test={len(X_test)}")
+                logger.info(f"✅ Données splittées: train={len(X_train)}, test={len(X_test)}")
             except Exception as split_error:
-                logger.error(f"Erreur lors du split: {split_error}")
+                logger.error(f"❌ Erreur lors du split: {split_error}")
                 return [{"model_name": "Split", "metrics": {"error": str(split_error)}}]
         else:
-            logger.info(f"Mode clustering: utilisation de tout le dataset ({len(X)} échantillons)")
+            logger.info(f"🔍 Mode clustering: utilisation de tout le dataset ({len(X)} échantillons)")
         
         # Entraînement de chaque modèle
         successful_models = 0
         
         for i, model_name in enumerate(model_names, 1):
-            logger.info(f"Processing model {i}/{len(model_names)}: {model_name}")
+            logger.info(f"🔧 Processing model {i}/{len(model_names)}: {model_name}")
             
             # Vérification du temps total
             total_duration = monitor.get_total_duration()
             if total_duration > MAX_TRAINING_TIME:
-                logger.warning(f"Temps d'entraînement dépassé ({total_duration:.0f}s > {MAX_TRAINING_TIME}s)")
+                logger.warning(f"⏰ Temps d'entraînement dépassé ({total_duration:.0f}s > {MAX_TRAINING_TIME}s)")
                 results.append({
                     "model_name": model_name,
                     "metrics": {"error": "Temps d'entraînement maximum dépassé"}
@@ -613,7 +726,7 @@ def train_models(
             # Vérification des ressources
             resource_info = monitor.check_resources()
             if resource_info.get('memory_percent', 0) > 90:
-                logger.warning("Mémoire élevée, nettoyage...")
+                logger.warning("🧹 Mémoire élevée, nettoyage...")
                 gc.collect()
             
             # Création du pipeline LEAK-FREE
@@ -677,7 +790,8 @@ def train_models(
                         )
                     
                     # Sauvegarde du modèle
-                    model_filename = f"{model_name.replace(' ', '_').lower()}_{task_type}_{int(time.time())}.joblib"
+                    timestamp = int(time.time())
+                    model_filename = f"{model_name.replace(' ', '_').lower()}_{task_type}_{timestamp}.joblib"
                     model_path = os.path.join("models_output", model_filename)
                     
                     joblib.dump(training_result["model"], model_path)
@@ -689,55 +803,42 @@ def train_models(
                         "model_path": model_path,
                         "training_time": training_result["training_time"],
                         "best_params": training_result.get("best_params"),
+                        "cv_scores": training_result.get("cv_scores"),
                         "model": training_result["model"],
                         "label_encoder": label_encoder,
                         "feature_names": feature_list,
-                        "task_type": task_type 
+                        "task_type": task_type,
+                        "timestamp": timestamp
                     }
 
-                    # Ajout des données pour visualisations
+                    # Ajout des données pour visualisations (avec gestion mémoire)
                     try:
-                        # Échantillonnage pour réduire la charge mémoire
                         max_samples = 1000
                         if task_type == 'clustering':
-                            # Stockage des données et labels pour clustering
-                            if X is None or len(X) == 0:
-                                logger.error(f"X est None ou vide pour {model_name}")
-                                result["X_sample"] = None
-                                result["labels"] = None
-                            else:
-                                X_sample = X.sample(n=min(max_samples, len(X)), random_state=42) if len(X) > max_samples else X
-                                if 'DBSCAN' in model_name:
-                                    # DBSCAN utilise labels_ au lieu de predict
-                                    cluster_labels = training_result["model"].named_steps['model'].labels_
-                                    if len(cluster_labels) > len(X_sample):
-                                        cluster_labels = cluster_labels[X_sample.index]
-                                    elif len(cluster_labels) < len(X_sample):
-                                        logger.warning(f"Labels incomplets pour DBSCAN, recalcul...")
-                                        cluster_labels = training_result["model"].fit_predict(X_sample)
-                                else:
+                            # Échantillonnage pour clustering
+                            if X is not None and len(X) > 0:
+                                X_sample = X.sample(n=min(max_samples, len(X)), random_state=42)
+                                if hasattr(training_result["model"], 'predict'):
                                     cluster_labels = training_result["model"].predict(X_sample)
+                                else:
+                                    cluster_labels = training_result["model"].fit_predict(X_sample)
                                 result["X_sample"] = X_sample
                                 result["labels"] = cluster_labels
                         else:
-                            # Supervisé
-                            if X_test is None or len(X_test) == 0:
-                                logger.error(f"X_test est None ou vide pour {model_name}")
-                                result["X_sample"] = None
-                            else:
-                                X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42) if len(X_test) > max_samples else X_test
+                            # Supervisé - échantillonnage des données de test
+                            if X_test is not None and len(X_test) > 0:
+                                X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42)
                                 result["X_sample"] = X_sample
-                                result["X_train"] = X_train.sample(n=min(max_samples, len(X_train)), random_state=42) if len(X_train) > max_samples else X_train
-                                result["y_train"] = y_train.loc[result["X_train"].index]  # Aligner indices
+                                if X_train is not None and len(X_train) > 0:
+                                    result["X_train"] = X_train.sample(n=min(max_samples, len(X_train)), random_state=42)
+                                    result["y_train"] = y_train.loc[result["X_train"].index]
                                 if task_type == 'classification' and label_encoder is not None:
                                     result["class_names"] = label_encoder.classes_.tolist()
 
-                            logger.info(f"Données de visualisation ajoutées pour {model_name}")
+                            logger.debug(f"📈 Données de visualisation ajoutées pour {model_name}")
                     except Exception as e:
-                        logger.error(f"Erreur ajout données visualisation pour {model_name}: {e}")
+                        logger.error(f"❌ Erreur ajout données visualisation pour {model_name}: {e}")
                         result["metrics"]["visualization_error"] = str(e)
-                        result["X_sample"] = None
-                        result["labels"] = None
 
                     results.append(result)
                     successful_models += 1
@@ -766,9 +867,35 @@ def train_models(
         
         # Rapport final
         total_time = monitor.get_total_duration()
-        logger.info(f"🎯 Entraînement terminé: {successful_models}/{len(model_names)} modèles réussis en {total_time:.2f}s")
+        monitor_summary = monitor.get_summary()
         
-        # Nettoyage mémoire
+        # Sauvegarde du log d'entraînement
+        training_log = {
+            "timestamp": datetime.now().isoformat(),
+            "task_type": task_type,
+            "target_column": target_column,
+            "models_attempted": len(model_names),
+            "models_successful": successful_models,
+            "total_training_time": total_time,
+            "monitor_summary": monitor_summary,
+            "data_validation": data_validation,
+            "results_summary": [
+                {
+                    "model_name": r["model_name"],
+                    "success": "metrics" in r and "error" not in r.get("metrics", {}),
+                    "training_time": r.get("training_time", 0)
+                } for r in results
+            ]
+        }
+        
+        log_filename = f"training_log_{int(time.time())}.json"
+        with open(os.path.join("training_logs", log_filename), 'w') as f:
+            json.dump(training_log, f, indent=2)
+        
+        logger.info(f"🎯 Entraînement terminé: {successful_models}/{len(model_names)} "
+                   f"modèles réussis en {total_time:.2f}s")
+        
+        # Nettoyage mémoire final
         gc.collect()
         
     except Exception as e:
@@ -808,7 +935,18 @@ def cleanup_models_directory(max_files: int = 20):
                 logger.info(f"🗑️ Fichier modèle supprimé: {filepath}")
                 
     except Exception as e:
-        logger.error(f"Erreur nettoyage dossier modèles: {e}")
+        logger.error(f"❌ Erreur nettoyage dossier modèles: {e}")
 
 # Nettoyage automatique au chargement du module
 cleanup_models_directory()
+
+# Export des fonctions principales
+__all__ = [
+    'TrainingMonitor',
+    'validate_training_data', 
+    'create_leak_free_pipeline',
+    'train_single_model_supervised',
+    'train_single_model_unsupervised',
+    'train_models',
+    'cleanup_models_directory'
+]

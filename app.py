@@ -377,7 +377,7 @@ if uploaded_file is not None:
                                 {"Colonne": col, "Conversion": change}
                                 for col, change in report["changes"].items()
                             ])
-                            st.dataframe(changes_df, use_container_width=True)
+                            st.dataframe(changes_df, width='stretch')
                             
                         # Avertissements si présents
                         if report.get("warnings"):
@@ -451,7 +451,7 @@ if st.session_state.df is not None:
                 # Pour Pandas
                 df_preview = df.head(preview_rows)
             
-            st.dataframe(df_preview, use_container_width=True, height=300)
+            st.dataframe(df_preview, width='stretch', height=300)
             
             if len(df_preview) == preview_rows:
                 st.caption(f"Affichage des {preview_rows} premières lignes")
@@ -465,7 +465,7 @@ if st.session_state.df is not None:
                 df_fallback = df.head(50).astype(str)
                 if hasattr(df_fallback, 'compute'):
                     df_fallback = df_fallback.compute()
-                st.dataframe(df_fallback, use_container_width=True)
+                st.dataframe(df_fallback, width='stretch')
                 st.caption("Aperçu avec conversion forcée en texte")
             except:
                 st.error("Impossible d'afficher l'aperçu des données")

@@ -1,34 +1,63 @@
 import os
 import tempfile
-from matplotlib import cm
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
 import logging
-import psutil
-from typing import Dict, List, Any, Optional
+import gc
+from typing import Dict, List, Any, Optional, Tuple, Union
 from functools import wraps
-import streamlit as st
 import concurrent.futures
 import uuid
 import base64
 from io import BytesIO
 
-# Import conditionnel de SHAP
+# Configuration du logging
+logger = logging.getLogger(__name__)
+
+# Import conditionnel de dépendances optionnelles
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+    logger.warning("Streamlit non disponible - certaines fonctionnalités limitées")
+
 try:
     import shap
     SHAP_AVAILABLE = True
 except ImportError:
     SHAP_AVAILABLE = False
-    shap = None
+    logger.warning("SHAP non disponible - analyse d'importance avancée limitée")
 
-from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_samples, silhouette_score
-from sklearn.model_selection import learning_curve
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logger.warning("psutil non disponible - monitoring système limité")
 
-logger = logging.getLogger(__name__)
+try:
+    from matplotlib import cm
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logger.warning("matplotlib non disponible - certaines couleurs limitées")
+
+try:
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import silhouette_samples, silhouette_score
+    from sklearn.model_selection import learning_curve
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    logger.error("scikit-learn non disponible - fonctionnalités critiques manquantes")
+
+# =============================
+# Décorateurs de monitoring
+# =============================
 
 def timeout(seconds: int = 300):
     """Décorateur pour limiter le temps d'exécution des visualisations"""
@@ -40,14 +69,66 @@ def timeout(seconds: int = 300):
                     future = executor.submit(func, *args, **kwargs)
                     return future.result(timeout=seconds)
                 except concurrent.futures.TimeoutError:
-                    logger.error(f"Timeout: {func.__name__} took too long (> {seconds}s)")
+                    logger.error(f"⏰ Timeout: {func.__name__} took too long (> {seconds}s)")
                     return None
         return wrapper
     return decorator
 
+def monitor_evaluation_operation(func):
+    """Décorateur pour monitorer les opérations d'évaluation"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        start_memory = _get_memory_usage()
+        
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            memory_used = _get_memory_usage() - start_memory
+            
+            if elapsed > 5:
+                logger.warning(f"⏰ {func.__name__} took {elapsed:.2f}s, memory: {memory_used:+.1f}MB")
+                
+            return result
+        except Exception as e:
+            logger.error(f"❌ {func.__name__} failed: {e}")
+            return None
+    return wrapper
+
+def safe_execute(fallback_value=None, log_errors=True):
+    """Décorateur pour l'exécution sécurisée avec fallback"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if log_errors:
+                    logger.error(f"❌ Safe execution failed in {func.__name__}: {str(e)}")
+                return fallback_value
+        return wrapper
+    return decorator
+
+# =============================
+# Fonctions utilitaires
+# =============================
+
+def _get_memory_usage() -> float:
+    """Obtient l'utilisation mémoire actuelle en MB"""
+    try:
+        if PSUTIL_AVAILABLE:
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024
+        return 0.0
+    except:
+        return 0.0
+
 def get_system_metrics() -> Dict[str, Any]:
     """Récupère les métriques système"""
     try:
+        if not PSUTIL_AVAILABLE:
+            return {'memory_percent': 0, 'memory_available_mb': 0, 'timestamp': time.time()}
+            
         memory = psutil.virtual_memory()
         return {
             'memory_percent': memory.percent,
@@ -55,37 +136,117 @@ def get_system_metrics() -> Dict[str, Any]:
             'timestamp': time.time()
         }
     except Exception as e:
-        logger.error(f"System metrics failed: {e}")
+        logger.error(f"❌ System metrics failed: {e}")
         return {'memory_percent': 0, 'memory_available_mb': 0, 'timestamp': time.time()}
 
-def monitor_evaluation_operation(func):
-    """Décorateur pour monitorer les opérations d'évaluation"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        try:
-            result = func(*args, **kwargs)
-            elapsed = time.time() - start_time
-            if elapsed > 5:
-                logger.warning(f"Evaluation operation {func.__name__} took {elapsed:.2f}s")
-            return result
-        except Exception as e:
-            logger.error(f"Evaluation operation {func.__name__} failed: {e}")
-            return None
-    return wrapper
+def _safe_get(obj: Any, keys: List[str], default: Optional[Any] = None) -> Optional[Any]:
+    """
+    Accès sécurisé aux données nested.
+    
+    Args:
+        obj: Objet à explorer
+        keys: Liste des clés à accéder
+        default: Valeur par défaut
+        
+    Returns:
+        Valeur trouvée ou default
+    """
+    if obj is None:
+        return default
+    
+    current = obj
+    for key in keys:
+        if current is None:
+            return default
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif hasattr(current, key):
+            current = getattr(current, key)
+        else:
+            return default
+    return current if current is not None else default
+
+def _create_empty_plot(message: str) -> go.Figure:
+    """
+    Crée un graphique vide avec un message d'information.
+    
+    Args:
+        message: Message à afficher
+        
+    Returns:
+        Figure Plotly vide
+    """
+    fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        x=0.5, y=0.5,
+        xref="paper", yref="paper",
+        showarrow=False,
+        font=dict(size=16, color="#e74c3c")
+    )
+    fig.update_layout(
+        title="Visualisation non disponible",
+        template="plotly_white",
+        height=400,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    return fig
+
+def _format_metric_value(value: Any) -> str:
+    """
+    Formate les valeurs métriques avec gestion des cas spéciaux.
+    
+    Args:
+        value: Valeur à formater
+        
+    Returns:
+        Valeur formatée
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "N/A"
+    
+    try:
+        if isinstance(value, (int, np.integer)):
+            return f"{value:,}"
+        
+        if isinstance(value, (float, np.floating)):
+            return f"{value:.3f}"
+        
+        return str(value)
+    except (ValueError, TypeError):
+        return str(value)
+
+# =============================
+# Classe principale
+# =============================
 
 class ModelEvaluationVisualizer:
-    """Classe principale pour la visualisation des résultats d'évaluation des modèles ML"""
+    """
+    Classe robuste pour la visualisation des résultats d'évaluation des modèles ML.
+    Supporte classification, régression et clustering avec gestion d'erreurs avancée.
+    """
     
     def __init__(self, ml_results: List[Dict[str, Any]]):
+        """
+        Args:
+            ml_results: Liste des résultats des modèles ML
+        """
         self.ml_results = ml_results or []
         self.validation_result = self._validate_data()
         self._temp_dir = os.path.join(tempfile.gettempdir(), "ml_temp_plots")
         os.makedirs(self._temp_dir, exist_ok=True)
+        
+        logger.info(f"🔧 Visualizer initialisé: {len(self.ml_results)} résultats")
     
     @monitor_evaluation_operation
     def _validate_data(self) -> Dict[str, Any]:
-        """Valide les données d'évaluation avec gestion robuste"""
+        """
+        Valide les données d'évaluation avec gestion robuste.
+        
+        Returns:
+            Résultat de validation
+        """
         validation: Dict[str, Any] = {
             "has_results": False,
             "results_count": 0,
@@ -109,123 +270,78 @@ class ModelEvaluationVisualizer:
                 if not isinstance(result, dict):
                     continue
                     
-                has_error = self._safe_get(result, ['metrics', 'error']) is not None
-                model_name = self._safe_get(result, ['model_name'], 'Unknown')
+                has_error = _safe_get(result, ['metrics', 'error']) is not None
+                model_name = _safe_get(result, ['model_name'], 'Unknown')
                 
                 if has_error:
                     validation["failed_models"].append(result)
                 else:
                     validation["successful_models"].append(result)
             
-            # Détection du type de tâche améliorée
+            # Détection du type de tâche
             if validation["successful_models"]:
                 first_success = validation["successful_models"][0]
-                task_type = self._safe_get(first_success, ['task_type'])
+                task_type = _safe_get(first_success, ['task_type'])
                 
                 if not task_type:
                     # Détection automatique basée sur les métriques
-                    metrics = self._safe_get(first_success, ['metrics'], {})
+                    metrics = _safe_get(first_success, ['metrics'], {})
                     
-                    # Classification: présence de accuracy, precision, recall, f1_score
-                    classification_metrics = ['accuracy', 'precision', 'recall', 'f1_score']
-                    if any(k in metrics for k in classification_metrics):
+                    if any(k in metrics for k in ['accuracy', 'precision', 'recall', 'f1_score']):
                         task_type = 'classification'
-                    
-                    # Régression: présence de r2, mae, rmse, mse
                     elif any(k in metrics for k in ['r2', 'mae', 'rmse', 'mse']):
                         task_type = 'regression'
-                    
-                    # Clustering: présence de silhouette_score, n_clusters
                     elif any(k in metrics for k in ['silhouette_score', 'n_clusters']):
                         task_type = 'clustering'
-                    
-                    # Détection par la présence de labels/predictions
-                    elif self._safe_get(first_success, ['labels']) is not None:
+                    elif _safe_get(first_success, ['labels']) is not None:
                         task_type = 'clustering'
-                    elif self._safe_get(first_success, ['y_pred']) is not None:
-                        task_type = 'classification'  # Par défaut
                     else:
                         task_type = 'unknown'
                 
                 validation["task_type"] = task_type
             
-            # Identification du meilleur modèle selon le type de tâche
+            # Identification du meilleur modèle
             if validation["successful_models"]:
                 successful = validation["successful_models"]
                 
                 if validation["task_type"] == 'classification':
-                    # Critère principal: accuracy, puis f1_score
                     best = max(successful, key=lambda x: (
-                        self._safe_get(x, ['metrics', 'accuracy'], 0),
-                        self._safe_get(x, ['metrics', 'f1_score'], 0)
+                        _safe_get(x, ['metrics', 'accuracy'], 0),
+                        _safe_get(x, ['metrics', 'f1_score'], 0)
                     ))
                 elif validation["task_type"] == 'regression':
-                    # Critère principal: r2 score
-                    best = max(successful, key=lambda x: self._safe_get(x, ['metrics', 'r2'], -999))
+                    best = max(successful, key=lambda x: _safe_get(x, ['metrics', 'r2'], -999))
                 elif validation["task_type"] == 'clustering':
-                    # Critère principal: silhouette score
-                    best = max(successful, key=lambda x: self._safe_get(x, ['metrics', 'silhouette_score'], -999))
+                    best = max(successful, key=lambda x: _safe_get(x, ['metrics', 'silhouette_score'], -999))
                 else:
-                    # Type inconnu: prendre le premier modèle
                     best = successful[0]
                 
-                validation["best_model"] = self._safe_get(best, ['model_name'], 'Unknown')
+                validation["best_model"] = _safe_get(best, ['model_name'], 'Unknown')
             
-            logger.info(f"Validation terminée: {len(validation['successful_models'])} modèles OK, {len(validation['failed_models'])} erreurs")
+            logger.info(f"✅ Validation terminée: {len(validation['successful_models'])} modèles OK, {len(validation['failed_models'])} erreurs")
             
         except Exception as e:
             validation["errors"].append(f"Erreur validation: {str(e)}")
-            logger.error(f"Evaluation validation error: {e}")
+            logger.error(f"❌ Erreur validation évaluation: {e}")
         
         return validation
-    
-    @staticmethod
-    def _safe_get(obj: Any, keys: List[str], default: Optional[Any] = None) -> Optional[Any]:
-        """Accès sécurisé aux données nested"""
-        if obj is None:
-            return default
-        
-        current = obj
-        for key in keys:
-            if current is None:
-                return default
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            elif hasattr(current, key):
-                current = getattr(current, key)
-            else:
-                return default
-        return current if current is not None else default
-
-    def _create_empty_plot(self, message: str) -> go.Figure:
-        """Crée un graphique vide avec un message"""
-        fig = go.Figure()
-        fig.add_annotation(
-            text=message,
-            x=0.5, y=0.5,
-            xref="paper", yref="paper",
-            showarrow=False,
-            font=dict(size=16, color="#e74c3c")
-        )
-        fig.update_layout(
-            title="Visualisation non disponible",
-            template="plotly_white",
-            height=400,
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)'
-        )
-        return fig
 
     @monitor_evaluation_operation
+    @timeout(seconds=60)
     def get_comparison_plot(self) -> go.Figure:
-        """Crée le graphique de comparaison des modèles selon le type de tâche"""
+        """
+        Crée le graphique de comparaison des modèles selon le type de tâche.
+        
+        Returns:
+            Figure Plotly de comparaison
+        """
         try:
             successful_results = self.validation_result["successful_models"]
             
             if not successful_results:
-                return self._create_empty_plot("Aucun modèle valide à comparer")
+                return _create_empty_plot("Aucun modèle valide à comparer")
             
-            model_names = [self._safe_get(r, ['model_name'], f'Modèle_{i}') 
+            model_names = [_safe_get(r, ['model_name'], f'Modèle_{i}') 
                          for i, r in enumerate(successful_results)]
             
             task_type = self.validation_result["task_type"]
@@ -238,28 +354,27 @@ class ModelEvaluationVisualizer:
             elif task_type == 'clustering':
                 return self._create_clustering_comparison_plot(successful_results, model_names)
             else:
-                return self._create_empty_plot(f"Type de tâche '{task_type}' non supporté")
+                return _create_empty_plot(f"Type de tâche '{task_type}' non supporté")
                 
         except Exception as e:
-            logger.error(f"Comparison plot creation failed: {e}")
-            return self._create_empty_plot(f"Erreur: {str(e)}")
+            logger.error(f"❌ Création graphique comparaison échouée: {e}")
+            return _create_empty_plot(f"Erreur: {str(e)}")
 
     def _create_classification_comparison_plot(self, results: List, model_names: List[str]) -> go.Figure:
         """Graphique de comparaison pour la classification"""
         metrics_data = {
-            'Accuracy': [self._safe_get(r, ['metrics', 'accuracy'], 0) for r in results],
-            'F1-Score': [self._safe_get(r, ['metrics', 'f1_score'], 0) for r in results],
-            'Precision': [self._safe_get(r, ['metrics', 'precision'], 0) for r in results],
-            'Recall': [self._safe_get(r, ['metrics', 'recall'], 0) for r in results]
+            'Accuracy': [_safe_get(r, ['metrics', 'accuracy'], 0) for r in results],
+            'F1-Score': [_safe_get(r, ['metrics', 'f1_score'], 0) for r in results],
+            'Precision': [_safe_get(r, ['metrics', 'precision'], 0) for r in results],
+            'Recall': [_safe_get(r, ['metrics', 'recall'], 0) for r in results]
         }
         return self._create_metrics_bar_plot(metrics_data, model_names, 'Classification')
 
     def _create_regression_comparison_plot(self, results: List, model_names: List[str]) -> go.Figure:
         """Graphique de comparaison pour la régression"""
-        # Pour la régression, on inverse MAE et RMSE (plus bas = mieux)
-        r2_scores = [self._safe_get(r, ['metrics', 'r2'], 0) for r in results]
-        mae_scores = [self._safe_get(r, ['metrics', 'mae'], 0) for r in results]
-        rmse_scores = [self._safe_get(r, ['metrics', 'rmse'], 0) for r in results]
+        r2_scores = [_safe_get(r, ['metrics', 'r2'], 0) for r in results]
+        mae_scores = [_safe_get(r, ['metrics', 'mae'], 0) for r in results]
+        rmse_scores = [_safe_get(r, ['metrics', 'rmse'], 0) for r in results]
         
         fig = make_subplots(
             rows=1, cols=2,
@@ -298,10 +413,9 @@ class ModelEvaluationVisualizer:
 
     def _create_clustering_comparison_plot(self, results: List, model_names: List[str]) -> go.Figure:
         """Graphique de comparaison pour le clustering"""
-        silhouette_scores = [self._safe_get(r, ['metrics', 'silhouette_score'], 0) for r in results]
-        n_clusters = [self._safe_get(r, ['metrics', 'n_clusters'], 0) for r in results]
+        silhouette_scores = [_safe_get(r, ['metrics', 'silhouette_score'], 0) for r in results]
+        n_clusters = [_safe_get(r, ['metrics', 'n_clusters'], 0) for r in results]
         
-        # Création d'un graphique combiné
         fig = make_subplots(
             rows=1, cols=2,
             subplot_titles=('Score de Silhouette', 'Nombre de Clusters'),
@@ -370,15 +484,20 @@ class ModelEvaluationVisualizer:
 
     @monitor_evaluation_operation
     def get_comparison_dataframe(self) -> pd.DataFrame:
-        """Crée un DataFrame comparatif des modèles avec formatage conditionnel"""
+        """
+        Crée un DataFrame comparatif des modèles avec formatage conditionnel.
+        
+        Returns:
+            DataFrame de comparaison
+        """
         comparison_data = []
         
         for result in self.ml_results:
-            model_name = self._safe_get(result, ['model_name'], 'Unknown')
-            training_time = self._safe_get(result, ['training_time'], 0)
-            metrics = self._safe_get(result, ['metrics'], {})
+            model_name = _safe_get(result, ['model_name'], 'Unknown')
+            training_time = _safe_get(result, ['training_time'], 0)
+            metrics = _safe_get(result, ['metrics'], {})
             
-            has_error = self._safe_get(metrics, ['error']) is not None
+            has_error = _safe_get(metrics, ['error']) is not None
             
             row = {
                 'Modèle': model_name,
@@ -389,26 +508,25 @@ class ModelEvaluationVisualizer:
             if not has_error:
                 task_type = self.validation_result["task_type"]
                 
-                # Métriques spécifiques par type de tâche
                 if task_type == 'classification':
                     row.update({
-                        'Accuracy': self._format_metric_value(self._safe_get(metrics, ['accuracy'])),
-                        'F1-Score': self._format_metric_value(self._safe_get(metrics, ['f1_score'])),
-                        'Precision': self._format_metric_value(self._safe_get(metrics, ['precision'])),
-                        'Recall': self._format_metric_value(self._safe_get(metrics, ['recall']))
+                        'Accuracy': _format_metric_value(_safe_get(metrics, ['accuracy'])),
+                        'F1-Score': _format_metric_value(_safe_get(metrics, ['f1_score'])),
+                        'Precision': _format_metric_value(_safe_get(metrics, ['precision'])),
+                        'Recall': _format_metric_value(_safe_get(metrics, ['recall']))
                     })
                 elif task_type == 'regression':
                     row.update({
-                        'R²': self._format_metric_value(self._safe_get(metrics, ['r2'])),
-                        'MAE': self._format_metric_value(self._safe_get(metrics, ['mae'])),
-                        'RMSE': self._format_metric_value(self._safe_get(metrics, ['rmse'])),
-                        'MSE': self._format_metric_value(self._safe_get(metrics, ['mse']))
+                        'R²': _format_metric_value(_safe_get(metrics, ['r2'])),
+                        'MAE': _format_metric_value(_safe_get(metrics, ['mae'])),
+                        'RMSE': _format_metric_value(_safe_get(metrics, ['rmse'])),
+                        'MSE': _format_metric_value(_safe_get(metrics, ['mse']))
                     })
                 elif task_type == 'clustering':
                     row.update({
-                        'Silhouette': self._format_metric_value(self._safe_get(metrics, ['silhouette_score'])),
-                        'N_Clusters': self._format_metric_value(self._safe_get(metrics, ['n_clusters'])),
-                        'Inertie': self._format_metric_value(self._safe_get(metrics, ['inertia']))
+                        'Silhouette': _format_metric_value(_safe_get(metrics, ['silhouette_score'])),
+                        'N_Clusters': _format_metric_value(_safe_get(metrics, ['n_clusters'])),
+                        'DB_Index': _format_metric_value(_safe_get(metrics, ['davies_bouldin_score']))
                     })
             
             comparison_data.append(row)
@@ -420,55 +538,46 @@ class ModelEvaluationVisualizer:
             if df[col].dtype == 'object':
                 df[col] = df[col].astype(str)
         
+        logger.info(f"✅ DataFrame comparaison généré: {len(df)} modèles")
         return df
-    
-    def _format_metric_value(self, value: Any) -> str:
-        """Formate les valeurs métriques avec gestion des cas spéciaux"""
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            return "N/A"
-        
-        try:
-            if isinstance(value, (int, np.integer)):
-                return f"{value:,}"
-            
-            if isinstance(value, (float, np.floating)):
-                return f"{value:.3f}"
-            
-            return str(value)
-        except (ValueError, TypeError):
-            return str(value)
 
     @monitor_evaluation_operation
+    @timeout(seconds=120)
     def get_performance_distribution_plot(self) -> go.Figure:
-        """Crée un graphique de distribution des performances selon le type de tâche"""
+        """
+        Crée un graphique de distribution des performances selon le type de tâche.
+        
+        Returns:
+            Figure Plotly de distribution
+        """
         try:
             if not self.validation_result["successful_models"]:
-                return self._create_empty_plot("Aucune donnée de performance disponible")
+                return _create_empty_plot("Aucune donnée de performance disponible")
             
             task_type = self.validation_result["task_type"]
             
             if task_type == 'classification':
-                values = [self._safe_get(r, ['metrics', 'accuracy'], 0) 
+                values = [_safe_get(r, ['metrics', 'accuracy'], 0) 
                          for r in self.validation_result["successful_models"]]
                 title = "Distribution des Scores d'Accuracy"
                 x_title = "Score d'Accuracy"
                 color = 'lightblue'
                 
             elif task_type == 'regression':
-                values = [self._safe_get(r, ['metrics', 'r2'], 0) 
+                values = [_safe_get(r, ['metrics', 'r2'], 0) 
                          for r in self.validation_result["successful_models"]]
                 title = "Distribution des Scores R²"
                 x_title = "Score R²"
                 color = 'lightgreen'
                 
             elif task_type == 'clustering':
-                values = [self._safe_get(r, ['metrics', 'silhouette_score'], 0) 
+                values = [_safe_get(r, ['metrics', 'silhouette_score'], 0) 
                          for r in self.validation_result["successful_models"]]
                 title = "Distribution des Scores de Silhouette"
                 x_title = "Score de Silhouette"
                 color = 'mediumpurple'
             else:
-                return self._create_empty_plot("Type de tâche non supporté pour la distribution")
+                return _create_empty_plot("Type de tâche non supporté pour la distribution")
             
             fig = go.Figure()
             
@@ -498,41 +607,53 @@ class ModelEvaluationVisualizer:
             return fig
             
         except Exception as e:
-            logger.error(f"Cluster scatter plot failed: {e}")
-            return self._create_empty_plot(f"Erreur: {str(e)}")
+            logger.error(f"❌ Graphique distribution performances échoué: {e}")
+            return _create_empty_plot(f"Erreur: {str(e)}")
 
     @monitor_evaluation_operation
+    @timeout(seconds=90)
     def create_silhouette_plot(self, model_result: Dict[str, Any]) -> go.Figure:
-        """Silhouette plot avec gestion robuste des données"""
+        """
+        Crée un silhouette plot pour l'analyse de clustering.
+        
+        Args:
+            model_result: Résultat du modèle
+            
+        Returns:
+            Figure Plotly de silhouette
+        """
         try:
-            X = self._safe_get(model_result, ['X_sample'])
-            labels = self._safe_get(model_result, ['labels'])
-            model_name = self._safe_get(model_result, ['model_name'], 'Modèle')
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour le silhouette plot")
+                
+            X = _safe_get(model_result, ['X_sample'])
+            labels = _safe_get(model_result, ['labels'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
             
             if X is None or labels is None:
-                return self._create_empty_plot("Données manquantes pour le silhouette plot")
+                return _create_empty_plot("Données manquantes pour le silhouette plot")
             
             X = np.array(X)
             labels = np.array(labels)
             
             # Filtrage des valeurs valides
-            valid_mask = ~np.isnan(labels) & (labels != -1)  # Exclure le bruit
+            valid_mask = ~np.isnan(labels) & (labels != -1)
             if not np.any(valid_mask):
-                return self._create_empty_plot("Aucune donnée valide")
+                return _create_empty_plot("Aucune donnée valide")
                 
             X = X[valid_mask]
             labels = labels[valid_mask]
             
             unique_labels = np.unique(labels)
             if len(unique_labels) < 2:
-                return self._create_empty_plot("Au moins 2 clusters requis pour le silhouette plot")
+                return _create_empty_plot("Au moins 2 clusters requis pour le silhouette plot")
             
             # Calcul des scores silhouette
             try:
                 silhouette_vals = silhouette_samples(X, labels)
                 avg_score = silhouette_score(X, labels)
             except Exception as e:
-                return self._create_empty_plot(f"Erreur calcul silhouette: {str(e)}")
+                return _create_empty_plot(f"Erreur calcul silhouette: {str(e)}")
             
             fig = go.Figure()
             y_lower = 10
@@ -544,8 +665,14 @@ class ModelEvaluationVisualizer:
                 cluster_size = len(cluster_sil)
                 y_upper = y_lower + cluster_size
                 
-                color_rgb = cm.nipy_spectral(float(i) / len(unique_labels))
-                color = f'rgb({int(color_rgb[0]*255)},{int(color_rgb[1]*255)},{int(color_rgb[2]*255)})'
+                # Couleurs
+                if MATPLOTLIB_AVAILABLE:
+                    color_rgb = cm.nipy_spectral(float(i) / len(unique_labels))
+                    color = f'rgb({int(color_rgb[0]*255)},{int(color_rgb[1]*255)},{int(color_rgb[2]*255)})'
+                else:
+                    # Fallback colors
+                    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+                    color = colors[i % len(colors)]
                 
                 fig.add_trace(go.Scatter(
                     x=cluster_sil,
@@ -584,49 +711,73 @@ class ModelEvaluationVisualizer:
             return fig
             
         except Exception as e:
-            logger.error(f"Silhouette plot failed: {e}")
-            return self._create_empty_plot(f"Erreur: {str(e)}")
+            logger.error(f"❌ Silhouette plot échoué: {e}")
+            return _create_empty_plot(f"Erreur: {str(e)}")
 
     @monitor_evaluation_operation
+    @timeout(seconds=60)
     def create_feature_importance_plot(self, model, feature_names: List[str]) -> go.Figure:
-        """Crée un graphique d'importance des features avec support étendu"""
+        """
+        Crée un graphique d'importance des features.
+        
+        Args:
+            model: Modèle entraîné
+            feature_names: Noms des features
+            
+        Returns:
+            Figure Plotly d'importance des features
+        """
         try:
             importances = None
             method_used = ""
+            final_feature_names = feature_names
             
-            # Différentes méthodes pour extraire l'importance des features
-            if hasattr(model, 'feature_importances_'):
-                # Random Forest, Gradient Boosting, etc.
-                importances = model.feature_importances_
-                method_used = "Feature Importances (Tree-based)"
+            # Extraction du modèle depuis un pipeline si nécessaire
+            if hasattr(model, 'named_steps'):
+                pipeline_steps = list(model.named_steps.keys())
+                model_step = pipeline_steps[-1]
+                actual_model = model.named_steps[model_step]
                 
-            elif hasattr(model, 'coef_'):
-                # Linear models, SVM, etc.
-                coef = model.coef_
+                # Extraire les noms des features après prétraitement
+                try:
+                    if 'preprocessor' in model.named_steps:
+                        preprocessor = model.named_steps['preprocessor']
+                        if hasattr(preprocessor, 'get_feature_names_out'):
+                            final_feature_names = preprocessor.get_feature_names_out()
+                            logger.info(f"✅ Noms des features extraits du préprocesseur: {len(final_feature_names)} features")
+                        else:
+                            logger.warning("⚠️ Le préprocesseur ne supporte pas get_feature_names_out")
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors de l'extraction des noms des features: {e}")
+                    return _create_empty_plot(f"Erreur extraction noms des features: {str(e)[:100]}...")
+            else:
+                actual_model = model
+            
+            # Extraction de l'importance selon le type de modèle
+            if hasattr(actual_model, 'feature_importances_'):
+                importances = actual_model.feature_importances_
+                method_used = "Feature Importances (Tree-based)"
+            elif hasattr(actual_model, 'coef_'):
+                coef = actual_model.coef_
                 if coef.ndim > 1:
-                    # Multi-class: moyenne des valeurs absolues
                     importances = np.mean(np.abs(coef), axis=0)
                 else:
                     importances = np.abs(coef)
                 method_used = "Coefficients (Linear model)"
-                
-            elif hasattr(model, 'dual_coef_') and hasattr(model, 'support_vectors_'):
-                # SVM avec kernel
-                return self._create_empty_plot("Feature importance non disponible pour SVM avec kernel")
-                
             else:
-                return self._create_empty_plot("Modèle ne supporte pas l'extraction d'importance des features")
+                return _create_empty_plot("Modèle ne supporte pas l'extraction d'importance des features")
             
-            if importances is None or len(importances) != len(feature_names):
-                return self._create_empty_plot("Incompatibilité entre features et importances")
+            if importances is None or len(importances) != len(final_feature_names):
+                logger.error(f"❌ Incompatibilité: {len(importances) if importances is not None else 'None'} importances vs {len(final_feature_names)} features")
+                return _create_empty_plot(f"Incompatibilité entre features ({len(final_feature_names)}) et importances ({len(importances) if importances is not None else 'None'})")
             
             # Préparation des données
             importance_df = pd.DataFrame({
-                'feature': feature_names,
+                'feature': final_feature_names,
                 'importance': importances
             }).sort_values('importance', ascending=True)
             
-            # Prendre les top N features pour la lisibilité
+            # Top N features pour la lisibilité
             top_n = min(20, len(importance_df))
             importance_df = importance_df.tail(top_n)
             
@@ -652,91 +803,97 @@ class ModelEvaluationVisualizer:
                 title=f"Top {top_n} - Importance des Features<br><sub>{method_used}</sub>",
                 xaxis_title="Importance",
                 yaxis_title="Features",
-                height=max(400, top_n * 25),  # Hauteur adaptative
+                height=max(400, top_n * 25),
                 template="plotly_white",
-                margin=dict(l=150)  # Marge gauche pour les noms de features
+                margin=dict(l=150)
             )
             
+            logger.info(f"✅ Graphique d'importance créé pour {method_used} avec {top_n} features")
             return fig
             
         except Exception as e:
-            logger.error(f"Feature importance plot failed: {e}")
-            return self._create_empty_plot("Erreur importance features")
+            logger.error(f"❌ Graphique importance features échoué: {e}")
+            return _create_empty_plot(f"Erreur lors de la création du graphique d'importance: {str(e)[:100]}...")
 
-    @monitor_evaluation_operation  
+    @monitor_evaluation_operation
+    @timeout(seconds=180)
     def create_shap_plot(self, model_result: Dict[str, Any]) -> go.Figure:
-        """Crée un SHAP summary plot si SHAP est disponible - VERSION CORRIGÉE"""
+        """
+        Crée un SHAP summary plot si SHAP est disponible.
+        
+        Args:
+            model_result: Résultat du modèle
+            
+        Returns:
+            Figure Plotly SHAP
+        """
         if not SHAP_AVAILABLE:
-            return self._create_empty_plot("SHAP n'est pas installé.\nInstallez avec: pip install shap")
+            return _create_empty_plot("SHAP n'est pas installé.\nInstallez avec: pip install shap")
         
         try:
-            # Extraction des données nécessaires
-            model = self._safe_get(model_result, ['model'])
-            X_sample = self._safe_get(model_result, ['X_sample'])  
-            feature_names = self._safe_get(model_result, ['feature_names'], [])
+            model = _safe_get(model_result, ['model'])
+            X_sample = _safe_get(model_result, ['X_sample'])  
+            feature_names = _safe_get(model_result, ['feature_names'], [])
             
-            # Essayer d'extraire le modèle depuis un pipeline si nécessaire
+            # Extraction du modèle depuis un pipeline si nécessaire
             if hasattr(model, 'named_steps'):
-                # C'est un pipeline, extraire le modèle final
                 pipeline_steps = list(model.named_steps.keys())
-                model_step = pipeline_steps[-1]  # Dernier step = modèle
+                model_step = pipeline_steps[-1]
                 actual_model = model.named_steps[model_step]
             else:
                 actual_model = model
             
             if actual_model is None or X_sample is None:
-                return self._create_empty_plot("Données manquantes pour l'analyse SHAP")
+                return _create_empty_plot("Données manquantes pour l'analyse SHAP")
             
             X_sample = np.array(X_sample)
             
-            # Limitation pour performance (SHAP peut être lent)
+            # Limitation pour performance
             n_samples = min(50, len(X_sample))
             X_shap = X_sample[:n_samples]
             
-            # Sélection intelligente de l'explainer
+            # Sélection de l'explainer
             explainer = None
             shap_values = None
             
             try:
-                # Essayer TreeExplainer pour les modèles tree-based
                 if hasattr(actual_model, 'feature_importances_'):
                     explainer = shap.TreeExplainer(actual_model)
                     shap_values = explainer.shap_values(X_shap)
                     
-                # Essayer LinearExplainer pour les modèles linéaires  
                 elif hasattr(actual_model, 'coef_'):
-                    explainer = shap.LinearExplainer(actual_model, X_shap[:20])  # Background plus petit
+                    explainer = shap.LinearExplainer(actual_model, X_shap[:20])
                     shap_values = explainer.shap_values(X_shap)
                     
-                # Fallback: KernelExplainer (plus lent mais universel)
                 else:
-                    background = shap.sample(X_shap, min(10, len(X_shap)))  # Échantillon background
-                    explainer = shap.KernelExplainer(actual_model.predict_proba if hasattr(actual_model, 'predict_proba') else actual_model.predict, background)
-                    shap_values = explainer.shap_values(X_shap[:20])  # Encore plus limité
+                    background = shap.sample(X_shap, min(10, len(X_shap)))
+                    explainer = shap.KernelExplainer(
+                        actual_model.predict_proba if hasattr(actual_model, 'predict_proba') else actual_model.predict, 
+                        background
+                    )
+                    shap_values = explainer.shap_values(X_shap[:20])
                 
                 # Gestion des valeurs SHAP multi-classes
                 if isinstance(shap_values, list) and len(shap_values) > 0:
-                    # Classification multi-classe: prendre la première classe
                     shap_values = shap_values[0]
                 
                 if shap_values is None:
-                    return self._create_empty_plot("Impossible de calculer les valeurs SHAP")
+                    return _create_empty_plot("Impossible de calculer les valeurs SHAP")
                 
-                # Créer le plot personnalisé
                 return self._create_custom_shap_plot(shap_values, X_shap[:len(shap_values)], feature_names)
                 
             except Exception as shap_error:
-                return self._create_empty_plot(f"Erreur SHAP: {str(shap_error)[:100]}...")
+                return _create_empty_plot(f"Erreur SHAP: {str(shap_error)[:100]}...")
             
         except Exception as e:
-            logger.error(f"SHAP plot failed: {e}")
-            return self._create_empty_plot(f"Erreur analyse SHAP: {str(e)[:50]}...")
+            logger.error(f"❌ SHAP plot échoué: {e}")
+            return _create_empty_plot(f"Erreur analyse SHAP: {str(e)[:50]}...")
 
     def _create_custom_shap_plot(self, shap_values: np.ndarray, X: np.ndarray, feature_names: List[str]) -> go.Figure:
-        """Crée un SHAP summary plot personnalisé avec Plotly - VERSION CORRIGÉE"""
+        """Crée un SHAP summary plot personnalisé avec Plotly"""
         try:
             if len(shap_values.shape) != 2:
-                return self._create_empty_plot("Format de valeurs SHAP incorrect")
+                return _create_empty_plot("Format de valeurs SHAP incorrect")
                 
             # Calcul de l'importance moyenne des features
             mean_abs_shap = np.mean(np.abs(shap_values), axis=0)
@@ -749,7 +906,6 @@ class ModelEvaluationVisualizer:
             
             fig = go.Figure()
             
-            # Créer le scatter plot pour chaque feature
             for idx, i in enumerate(top_indices):
                 feature_name = feature_names[i]
                 feature_shap_vals = shap_values[:, i]
@@ -763,7 +919,7 @@ class ModelEvaluationVisualizer:
                 
                 fig.add_trace(go.Scatter(
                     x=feature_shap_vals,
-                    y=[idx] * len(feature_shap_vals),  # Position Y fixe pour chaque feature
+                    y=[idx] * len(feature_shap_vals),
                     mode='markers',
                     marker=dict(
                         color=norm_vals,
@@ -778,7 +934,6 @@ class ModelEvaluationVisualizer:
                     hovertemplate=f'<b>{feature_name}</b><br>SHAP: %{{x:.4f}}<br>Valeur: {feature_vals[0]:.3f}<extra></extra>'
                 ))
             
-            # Mise à jour des axes
             fig.update_layout(
                 title="SHAP Summary Plot - Impact des Features sur les Prédictions",
                 xaxis_title="Valeur SHAP (impact sur le modèle)",
@@ -793,276 +948,141 @@ class ModelEvaluationVisualizer:
                 showlegend=False
             )
             
-            # Ligne verticale à x=0
             fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
             
             return fig
             
         except Exception as e:
-            return self._create_empty_plot(f"Erreur création SHAP plot: {str(e)}")
+            return _create_empty_plot(f"Erreur création SHAP plot: {str(e)}")
 
-    def show_model_details(self, selected_result: Dict[str, Any], task_type: str):
-        """Affiche les détails d'un modèle spécifique selon le type de tâche - VERSION CORRIGÉE"""
+    @monitor_evaluation_operation
+    @timeout(seconds=120)
+    def create_cluster_scatter_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Scatter plot des clusters avec gestion robuste des données.
+        
+        Args:
+            model_result: Résultat du modèle
+            
+        Returns:
+            Figure Plotly de scatter plot
+        """
         try:
-            model_name = self._safe_get(selected_result, ['model_name'], 'Unknown')
-            st.subheader(f"🔍 Analyse Détaillée: {model_name}")
+            X = _safe_get(model_result, ['X_sample'])
+            labels = _safe_get(model_result, ['labels'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
             
-            # Informations générales du modèle - DONNÉES DYNAMIQUES PAR MODÈLE
-            col1, col2 = st.columns(2)
+            if X is None or labels is None:
+                return _create_empty_plot("Données manquantes pour la visualisation")
             
-            with col1:
-                st.markdown("**📋 Informations Générales:**")
-                
-                # Temps d'entraînement spécifique au modèle sélectionné
-                training_time = self._safe_get(selected_result, ['training_time'], 0)
-                st.write(f"• **Temps d'entraînement:** {training_time:.2f}s")
-                st.write(f"• **Type de tâche:** {task_type.title()}")
-                
-                # Paramètres spécifiques au modèle sélectionné
-                model = self._safe_get(selected_result, ['model'])
-                if model is not None:
-                    if hasattr(model, 'get_params'):
-                        params = model.get_params()
-                        # Filtrer les paramètres principaux
-                        main_params = {}
-                        for key, value in params.items():
-                            if not callable(value) and not key.startswith('_') and len(str(value)) < 50:
-                                main_params[key] = value
-                        
-                        if main_params:
-                            st.write("• **Paramètres du modèle:**")
-                            for key, value in list(main_params.items())[:5]:  # Top 5 paramètres
-                                st.write(f"  - {key}: {value}")
-                
-                # Score de validation croisée si disponible
-                cv_score = self._safe_get(selected_result, ['cv_score'])
-                if cv_score is not None:
-                    st.write(f"• **Score CV:** {cv_score:.3f}")
-            
-            with col2:
-                st.markdown("**📊 Métriques de Performance:**")
-                
-                # Métriques spécifiques au modèle sélectionné
-                metrics = self._safe_get(selected_result, ['metrics'], {})
-                if metrics:
-                    # Filtrer et formater les métriques pour éviter les objets complexes
-                    clean_metrics = {}
-                    for k, v in metrics.items():
-                        if not isinstance(v, (dict, list, np.ndarray)) and k != 'error':
-                            if isinstance(v, (int, float, np.number)):
-                                clean_metrics[k] = f"{float(v):.4f}" if abs(float(v)) < 1000 else f"{float(v):.2e}"
-                            else:
-                                clean_metrics[k] = str(v)
-                    
-                    if clean_metrics:
-                        # Créer un DataFrame avec conversion de types appropriée
-                        metrics_data = []
-                        for key, value in clean_metrics.items():
-                            metrics_data.append({'Métrique': str(key), 'Valeur': str(value)})
-                        
-                        metrics_df = pd.DataFrame(metrics_data)
-                        st.dataframe(metrics_df, width=400, height=200)
-                    else:
-                        st.write("Aucune métrique numérique disponible")
-                else:
-                    st.write("Aucune métrique disponible")
-            
-            st.markdown("---")
-            
-            # Visualisations spécifiques selon le type de tâche
-            if task_type == 'clustering':
-                self._show_clustering_details(selected_result)
-            elif task_type in ['classification', 'regression']:
-                self._show_supervised_details(selected_result, task_type)
-            
-        except Exception as e:
-            st.error(f"❌ Erreur lors de l'affichage des détails: {str(e)}")
-            logger.error(f"Model details display failed: {e}")
-
-    def _show_clustering_details(self, selected_result: Dict[str, Any]):
-        """Affiche les détails spécifiques au clustering"""
-        st.markdown("### 🎯 Analyses de Clustering")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 📊 Visualisation des Clusters")
-            cluster_plot = self.create_cluster_scatter_plot(selected_result)
-            st.plotly_chart(cluster_plot, width='stretch')
-        
-        with col2:
-            st.markdown("#### 📈 Analyse Silhouette")
-            silhouette_plot = self.create_silhouette_plot(selected_result)
-            st.plotly_chart(silhouette_plot, width='stretch')
-        
-        # Statistiques détaillées des clusters
-        labels = self._safe_get(selected_result, ['labels'])
-        if labels is not None:
-            st.markdown("#### 📋 Statistiques des Clusters")
-            
+            X = np.array(X)
             labels = np.array(labels)
-            valid_labels = labels[~np.isnan(labels)]
             
-            if len(valid_labels) > 0:
-                unique_labels, counts = np.unique(valid_labels, return_counts=True)
+            # Gestion des valeurs manquantes
+            valid_mask = ~np.isnan(labels)
+            if not np.any(valid_mask):
+                return _create_empty_plot("Aucune donnée valide pour la visualisation")
                 
-                cluster_stats = []
-                for label, count in zip(unique_labels, counts):
-                    if label == -1:
-                        cluster_stats.append({
-                            'Cluster': 'Bruit',
-                            'Nombre d\'échantillons': int(count),
-                            'Pourcentage': f"{count/len(valid_labels)*100:.1f}%"
-                        })
-                    else:
-                        cluster_stats.append({
-                            'Cluster': f'Cluster {int(label)}',
-                            'Nombre d\'échantillons': int(count),
-                            'Pourcentage': f"{count/len(valid_labels)*100:.1f}%"
-                        })
-                
-                cluster_df = pd.DataFrame(cluster_stats)
-                # Conversion explicite pour éviter les erreurs PyArrow
-                for col in cluster_df.columns:
-                    cluster_df[col] = cluster_df[col].astype(str)
-                
-                st.dataframe(cluster_df, width='stretch')
-
-    def _show_supervised_details(self, selected_result: Dict[str, Any], task_type: str):
-        """Affiche les détails pour classification et régression - VERSION AMÉLIORÉE"""
-        st.markdown(f"### 🎯 Analyses de {task_type.title()}")
-        
-        # Ajout des courbes d'apprentissage
-        st.markdown("#### 📈 Courbes d'Apprentissage")
-        learning_curve_plot = self.create_learning_curve_plot(selected_result)
-        st.plotly_chart(learning_curve_plot, width='stretch')
-        
-        # Analyses des features
-        model = self._safe_get(selected_result, ['model'])
-        feature_names = self._safe_get(selected_result, ['feature_names'], [])
-        
-        if model and feature_names:
-            col1, col2 = st.columns(2)
+            X = X[valid_mask]
+            labels = labels[valid_mask]
             
-            with col1:
-                st.markdown("#### 📊 Importance des Features")
-                importance_plot = self.create_feature_importance_plot(model, feature_names)
-                st.plotly_chart(importance_plot, width='stretch')
+            # Réduction de dimension si nécessaire
+            if X.shape[1] > 2 and SKLEARN_AVAILABLE:
+                try:
+                    pca = PCA(n_components=2, random_state=42)
+                    X_reduced = pca.fit_transform(X)
+                    x_label = f"PC1 ({pca.explained_variance_ratio_[0]:.1%})"
+                    y_label = f"PC2 ({pca.explained_variance_ratio_[1]:.1%})"
+                except Exception:
+                    X_reduced = X[:, :2]
+                    x_label = "Feature 1"
+                    y_label = "Feature 2"
+            else:
+                X_reduced = X[:, :2] if X.shape[1] >= 2 else X
+                x_label = "Feature 1"
+                y_label = "Feature 2" if X.shape[1] >= 2 else "Feature 1"
             
-            with col2:
-                st.markdown("#### 🔍 Analyse SHAP")
-                if SHAP_AVAILABLE:
-                    with st.spinner("Calcul des valeurs SHAP en cours..."):
-                        shap_plot = self.create_shap_plot(selected_result)
-                        st.plotly_chart(shap_plot, width='stretch')
-                else:
-                    st.info("📦 SHAP n'est pas installé.\n\nInstallez avec: `pip install shap`")
+            unique_labels = np.unique(labels)
+            
+            fig = go.Figure()
+            
+            for i, label in enumerate(unique_labels):
+                mask = labels == label
+                if np.sum(mask) == 0:
+                    continue
                     
-                    # Affichage alternatif des coefficients/importances
-                    if hasattr(model, 'coef_') or hasattr(model, 'feature_importances_'):
-                        st.markdown("**💡 Informations disponibles:**")
-                        
-                        if hasattr(model, 'feature_importances_'):
-                            top_features = sorted(zip(feature_names, model.feature_importances_), 
-                                                key=lambda x: abs(x[1]), reverse=True)[:10]
-                            st.write("**Top 10 Features (Tree-based):**")
-                            for name, importance in top_features:
-                                st.write(f"• {name}: {importance:.4f}")
-                                
-                        elif hasattr(model, 'coef_'):
-                            coef = model.coef_[0] if model.coef_.ndim > 1 else model.coef_
-                            top_features = sorted(zip(feature_names, coef), 
-                                                key=lambda x: abs(x[1]), reverse=True)[:10]
-                            st.write("**Top 10 Features (Coefficients):**")
-                            for name, coef_val in top_features:
-                                st.write(f"• {name}: {coef_val:.4f}")
-        else:
-            st.warning("⚠️ Données du modèle ou noms des features manquants")
-        
-        # Matrice de confusion pour la classification
-        if task_type == 'classification':
-            confusion_matrix = self._safe_get(selected_result, ['confusion_matrix'])
-            if confusion_matrix is not None:
-                st.markdown("#### 📊 Matrice de Confusion")
-                self._show_confusion_matrix(confusion_matrix)
-
-    def _show_confusion_matrix(self, confusion_matrix: np.ndarray):
-        """Affiche la matrice de confusion"""
-        try:
-            cm = np.array(confusion_matrix)
-            
-            # Création du heatmap avec Plotly
-            fig = go.Figure(data=go.Heatmap(
-                z=cm,
-                text=cm,
-                texttemplate="%{text}",
-                colorscale='Blues',
-                showscale=True
-            ))
+                if label == -1:
+                    color = 'gray'
+                    name = 'Bruit'
+                    size = 6
+                    opacity = 0.4
+                else:
+                    if MATPLOTLIB_AVAILABLE:
+                        color_rgb = cm.nipy_spectral(float(i) / max(1, len(unique_labels)))
+                        color = f'rgb({int(color_rgb[0]*255)},{int(color_rgb[1]*255)},{int(color_rgb[2]*255)})'
+                    else:
+                        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+                        color = colors[i % len(colors)]
+                    name = f'Cluster {int(label)}'
+                    size = 8
+                    opacity = 0.7
+                
+                fig.add_trace(go.Scatter(
+                    x=X_reduced[mask, 0], 
+                    y=X_reduced[mask, 1] if X_reduced.shape[1] > 1 else np.zeros(np.sum(mask)),
+                    mode='markers',
+                    name=name,
+                    marker=dict(
+                        color=color,
+                        size=size,
+                        line=dict(width=0.5, color='white'),
+                        opacity=opacity
+                    ),
+                    hovertemplate=f'<b>{name}</b><br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<extra></extra>'
+                ))
             
             fig.update_layout(
-                title="Matrice de Confusion",
-                xaxis_title="Prédictions",
-                yaxis_title="Valeurs Réelles",
-                height=400,
-                template="plotly_white"
+                title=f"Visualisation des Clusters - {model_name}",
+                xaxis_title=x_label,
+                yaxis_title=y_label,
+                height=500,
+                template="plotly_white",
+                showlegend=True,
+                legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
             )
             
-            st.plotly_chart(fig, width='stretch')
+            return fig
             
-            # Calcul des métriques par classe
-            if cm.shape[0] == cm.shape[1]:  # Matrice carrée
-                n_classes = cm.shape[0]
-                class_metrics = []
-                
-                for i in range(n_classes):
-                    tp = cm[i, i]
-                    fp = cm[:, i].sum() - tp
-                    fn = cm[i, :].sum() - tp
-                    tn = cm.sum() - tp - fp - fn
-                    
-                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-                    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-                    
-                    class_metrics.append({
-                        'Classe': f'Classe {i}',
-                        'Précision': f"{precision:.3f}",
-                        'Rappel': f"{recall:.3f}",
-                        'F1-Score': f"{f1:.3f}"
-                    })
-                
-                st.markdown("**📊 Métriques par Classe:**")
-                class_df = pd.DataFrame(class_metrics)
-                # Conversion explicite pour éviter les erreurs PyArrow
-                for col in class_df.columns:
-                    class_df[col] = class_df[col].astype(str)
-                st.dataframe(class_df, width='stretch')
-                
         except Exception as e:
-            st.error(f"Erreur affichage matrice de confusion: {str(e)}")
+            logger.error(f"❌ Scatter plot clusters échoué: {e}")
+            return _create_empty_plot(f"Erreur visualisation clusters: {str(e)}")
 
+    @monitor_evaluation_operation
     def get_export_data(self) -> Dict[str, Any]:
-        """Prépare les données pour l'export avec informations complètes"""
+        """
+        Prépare les données pour l'export avec informations complètes.
+        
+        Returns:
+            Données structurées pour export
+        """
         try:
             models_data = []
             
             for result in self.validation_result["successful_models"]:
                 model_data = {
-                    "model_name": self._safe_get(result, ["model_name"], "Unknown"),
+                    "model_name": _safe_get(result, ["model_name"], "Unknown"),
                     "task_type": self.validation_result["task_type"],
-                    "training_time": self._safe_get(result, ["training_time"], 0),
+                    "training_time": _safe_get(result, ["training_time"], 0),
                     "metrics": {}
                 }
                 
                 # Extraction des métriques selon le type de tâche
-                metrics = self._safe_get(result, ["metrics"], {})
+                metrics = _safe_get(result, ["metrics"], {})
                 
-                # Filtrer les métriques exportables (pas d'objets complexes)
+                # Filtrer les métriques exportables
                 for key, value in metrics.items():
                     if not isinstance(value, (dict, list, np.ndarray)) and key != 'error':
                         try:
-                            # Convertir en types JSON-compatibles
                             if isinstance(value, (np.integer, np.floating)):
                                 model_data["metrics"][key] = float(value)
                             else:
@@ -1113,193 +1133,15 @@ class ModelEvaluationVisualizer:
             }
             
         except Exception as e:
-            logger.error(f"Export data preparation failed: {e}")
+            logger.error(f"❌ Préparation données export échouée: {e}")
             return {
                 "error": str(e), 
                 "export_timestamp": time.time(),
                 "task_type": self.validation_result.get("task_type", "unknown")
-            } 
-        except Exception as e:
-            logger.error(f"Performance distribution plot failed: {e}")
-            return self._create_empty_plot("Erreur création distribution")
+            }
 
-    @monitor_evaluation_operation
-    def create_learning_curve_plot(self, selected_result: Dict[str, Any]) -> go.Figure:
-        """Crée les courbes d'apprentissage pour un modèle"""
-        try:
-            model = self._safe_get(selected_result, ['model'])
-            X_train = self._safe_get(selected_result, ['X_train'])
-            y_train = self._safe_get(selected_result, ['y_train'])
-            model_name = self._safe_get(selected_result, ['model_name'], 'Modèle')
-            
-            if not all([model, X_train is not None, y_train is not None]):
-                return self._create_empty_plot("Données d'entraînement manquantes pour les courbes d'apprentissage")
-            
-            # Limitation de la taille pour éviter les timeouts
-            max_samples = min(2000, len(X_train))
-            
-            # Calcul des courbes d'apprentissage
-            train_sizes, train_scores, val_scores = learning_curve(
-                model, X_train[:max_samples], y_train[:max_samples],
-                cv=3,
-                n_jobs=1,
-                train_sizes=np.linspace(0.1, 1.0, 10),
-                random_state=42,
-                scoring='accuracy' if self.validation_result["task_type"] == 'classification' else 'r2'
-            )
-            
-            # Calcul des moyennes et écart-types
-            train_mean = np.mean(train_scores, axis=1)
-            train_std = np.std(train_scores, axis=1)
-            val_mean = np.mean(val_scores, axis=1)
-            val_std = np.std(val_scores, axis=1)
-            
-            fig = go.Figure()
-            
-            # Courbe d'entraînement
-            fig.add_trace(go.Scatter(
-                x=train_sizes,
-                y=train_mean,
-                mode='lines+markers',
-                name='Score d\'entraînement',
-                line=dict(color='#2ecc71'),
-                marker=dict(size=6)
-            ))
-            
-            # Zone d'incertitude train
-            fig.add_trace(go.Scatter(
-                x=np.concatenate([train_sizes, train_sizes[::-1]]),
-                y=np.concatenate([train_mean + train_std, (train_mean - train_std)[::-1]]),
-                fill='toself',
-                fillcolor='rgba(46, 204, 113, 0.2)',
-                line=dict(color='rgba(255,255,255,0)'),
-                name='Incertitude train',
-                showlegend=False
-            ))
-            
-            # Courbe de validation
-            fig.add_trace(go.Scatter(
-                x=train_sizes,
-                y=val_mean,
-                mode='lines+markers',
-                name='Score de validation',
-                line=dict(color='#e74c3c'),
-                marker=dict(size=6)
-            ))
-            
-            # Zone d'incertitude validation
-            fig.add_trace(go.Scatter(
-                x=np.concatenate([train_sizes, train_sizes[::-1]]),
-                y=np.concatenate([val_mean + val_std, (val_mean - val_std)[::-1]]),
-                fill='toself',
-                fillcolor='rgba(231, 76, 60, 0.2)',
-                line=dict(color='rgba(255,255,255,0)'),
-                name='Incertitude validation',
-                showlegend=False
-            ))
-            
-            fig.update_layout(
-                title=f"Courbes d'Apprentissage - {model_name}",
-                xaxis_title="Nombre d'échantillons d'entraînement",
-                yaxis_title="Score",
-                template="plotly_white",
-                height=500,
-                showlegend=True
-            )
-            
-            return fig
-            
-        except Exception as e:
-            logger.error(f"Learning curve plot failed: {e}")
-            return self._create_empty_plot(f"Erreur courbes d'apprentissage: {str(e)}")
-
-    @monitor_evaluation_operation
-    def create_cluster_scatter_plot(self, model_result: Dict[str, Any]) -> go.Figure:
-        """Scatter plot des clusters avec gestion robuste des données"""
-        try:
-            X = self._safe_get(model_result, ['X_sample'])
-            labels = self._safe_get(model_result, ['labels'])
-            model_name = self._safe_get(model_result, ['model_name'], 'Modèle')
-            
-            if X is None or labels is None:
-                return self._create_empty_plot("Données manquantes pour la visualisation")
-            
-            X = np.array(X)
-            labels = np.array(labels)
-            
-            # Gestion des valeurs manquantes
-            valid_mask = ~np.isnan(labels)
-            if not np.any(valid_mask):
-                return self._create_empty_plot("Aucune donnée valide pour la visualisation")
-                
-            X = X[valid_mask]
-            labels = labels[valid_mask]
-            
-            # Réduction de dimension si nécessaire
-            if X.shape[1] > 2:
-                try:
-                    pca = PCA(n_components=2, random_state=42)
-                    X_reduced = pca.fit_transform(X)
-                    x_label = f"PC1 ({pca.explained_variance_ratio_[0]:.1%})"
-                    y_label = f"PC2 ({pca.explained_variance_ratio_[1]:.1%})"
-                except Exception:
-                    # Fallback: prendre les deux premières dimensions
-                    X_reduced = X[:, :2]
-                    x_label = "Feature 1"
-                    y_label = "Feature 2"
-            else:
-                X_reduced = X
-                x_label = "Feature 1"
-                y_label = "Feature 2"
-            
-            unique_labels = np.unique(labels)
-            n_clusters = len(unique_labels[unique_labels >= 0])  # Exclure le bruit (-1)
-            
-            fig = go.Figure()
-            
-            for i, label in enumerate(unique_labels):
-                mask = labels == label
-                if np.sum(mask) == 0:
-                    continue
-                    
-                if label == -1:
-                    color = 'gray'
-                    name = 'Bruit'
-                    size = 6
-                    opacity = 0.4
-                else:
-                    color_rgb = cm.nipy_spectral(float(i) / max(1, n_clusters))
-                    color = f'rgb({int(color_rgb[0]*255)},{int(color_rgb[1]*255)},{int(color_rgb[2]*255)})'
-                    name = f'Cluster {int(label)}'
-                    size = 8
-                    opacity = 0.7
-                
-                fig.add_trace(go.Scatter(
-                    x=X_reduced[mask, 0], 
-                    y=X_reduced[mask, 1],
-                    mode='markers',
-                    name=name,
-                    marker=dict(
-                        color=color,
-                        size=size,
-                        line=dict(width=0.5, color='white'),
-                        opacity=opacity
-                    ),
-                    hovertemplate=f'<b>{name}</b><br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<extra></extra>'
-                ))
-            
-            fig.update_layout(
-                title=f"Visualisation des Clusters - {model_name}",
-                xaxis_title=x_label,
-                yaxis_title=y_label,
-                height=500,
-                template="plotly_white",
-                showlegend=True,
-                legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
-            )
-            
-            return fig
-            
-        except Exception as e:
-            logger.error(f"Cluster scatter plot failed: {e}")
-            return self._create_empty_plot(f"Erreur visualisation clusters: {str(e)}")
+# Export des fonctions principales
+__all__ = [
+    'ModelEvaluationVisualizer',
+    'get_system_metrics'
+]

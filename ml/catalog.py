@@ -251,7 +251,7 @@ if XGBRegressor:
 
 if XGBClassifier:
     MODEL_CATALOG["classification"]["XGBoost"] = {
-        "model": XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss'),
+        "model": XGBClassifier(random_state=42, eval_metric='logloss'),
         "params": {
             "model__n_estimators": [50, 100, 200],
             "model__max_depth": [3, 5, 7],
