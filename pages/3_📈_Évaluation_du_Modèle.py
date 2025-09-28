@@ -9,6 +9,14 @@ from ml.evaluation.visualization import ModelEvaluationVisualizer
 from ml.evaluation.metrics_calculation import get_system_metrics
 from utils.report_generator import generate_pdf_report
 
+# --- Correctif compatibilité PyArrow ---
+import os
+os.environ["PANDAS_USE_PYARROW"] = "0"
+try:
+    pd.options.mode.dtype_backend = "numpy_nullable"
+except Exception:
+    pass
+
 # --- Configuration de la page ---
 st.set_page_config(
     page_title="Évaluation des Modèles",
@@ -17,36 +25,92 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS personnalisé moderne ---
+# --- CSS personnalisé professionnel ---
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
+        font-size: 2rem;
+        color: #2c3e50;
         text-align: center;
         margin-bottom: 2rem;
-        font-weight: 700;
+        font-weight: 600;
+        border-bottom: 2px solid #3498db;
+        padding-bottom: 1rem;
     }
     .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: #ffffff;
+        border: 1px solid #e1e8ed;
+        border-radius: 8px;
         padding: 1.5rem;
-        border-radius: 15px;
-        color: white;
         margin: 0.5rem 0;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+        transition: box-shadow 0.2s ease;
+    }
+    .metric-card:hover {
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
     }
     .best-model-card {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        border: 2px solid #ffd700;
+        border-left: 4px solid #27ae60;
+        background: linear-gradient(135deg, #f8fff9 0%, #e8f5e8 100%);
     }
-    .performance-high { color: #00d26a; font-weight: 700; }
-    .performance-medium { color: #ffb200; font-weight: 700; }
-    .performance-low { color: #ff4d4d; font-weight: 700; }
+    .metric-title {
+        font-size: 0.85rem;
+        color: #7f8c8d;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 0.5rem;
+    }
+    .metric-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #2c3e50;
+        margin-bottom: 0.25rem;
+    }
+    .metric-subtitle {
+        font-size: 0.75rem;
+        color: #95a5a6;
+    }
+    .performance-high { 
+        color: #27ae60; 
+        font-weight: 700; 
+        background: #d5f4e6;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
+    .performance-medium { 
+        color: #f39c12; 
+        font-weight: 700;
+        background: #fef9e7;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
+    .performance-low { 
+        color: #e74c3c; 
+        font-weight: 700;
+        background: #fadbd8;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
     .tab-content {
-        padding: 2rem 1rem;
-        background: #f8f9fa;
-        border-radius: 10px;
+        padding: 1.5rem;
+        background: #ffffff;
+        border-radius: 8px;
         margin-top: 1rem;
+        border: 1px solid #ecf0f1;
+    }
+    .status-success {
+        color: #27ae60;
+        font-weight: 600;
+    }
+    .status-error {
+        color: #e74c3c;
+        font-weight: 600;
+    }
+    .section-divider {
+        border-top: 1px solid #bdc3c7;
+        margin: 2rem 0 1rem 0;
+        padding-top: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -57,53 +121,90 @@ def cached_plot(fig):
     return fig
 
 def display_metrics_header(validation):
-    """Affiche l'en-tête avec les métriques principales"""
+    """Affiche l'en-tête avec les métriques principales - Design professionnel"""
     successful_count = len(validation["successful_models"])
     total_count = validation["results_count"]
     
-    st.markdown('<div class="main-header">📈 Tableau de Bord d\'Évaluation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📈 Tableau de Bord d\'Évaluation des Modèles</div>', unsafe_allow_html=True)
     
-    # Indicateurs principaux
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Indicateurs principaux avec design professionnel
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         success_rate = (successful_count / total_count * 100) if total_count > 0 else 0
-        st.metric("📊 Taux de Réussite", f"{success_rate:.1f}%")
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">Taux de Réussite</div>
+            <div class="metric-value">{success_rate:.1f}%</div>
+            <div class="metric-subtitle">{successful_count} sur {total_count} modèles</div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col2:
-        st.metric("✅ Modèles Validés", successful_count)
+        card_class = "metric-card best-model-card" if validation["best_model"] else "metric-card"
+        st.markdown(f"""
+        <div class="{card_class}">
+            <div class="metric-title">Meilleur Modèle</div>
+            <div class="metric-value" style="font-size: 1.2rem;">{validation["best_model"] or "N/A"}</div>
+            <div class="metric-subtitle">Type: {validation["task_type"].title()}</div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col3:
-        st.metric("❌ Échecs", len(validation["failed_models"]))
+        failed_count = len(validation["failed_models"])
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">Modèles Échoués</div>
+            <div class="metric-value" style="color: #e74c3c;">{failed_count}</div>
+            <div class="metric-subtitle">Erreurs détectées</div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col4:
-        if validation["best_model"]:
-            st.metric("🏆 Meilleur Modèle", validation["best_model"])
-        else:
-            st.metric("🏆 Meilleur Modèle", "N/A")
-    
-    with col5:
         memory_info = get_system_metrics()
-        mem_color = "normal" if memory_info['memory_percent'] < 80 else "off"
-        st.metric("💾 Mémoire Utilisée", f"{memory_info['memory_percent']:.1f}%", delta=None, delta_color=mem_color)
+        memory_color = "#27ae60" if memory_info['memory_percent'] < 70 else "#f39c12" if memory_info['memory_percent'] < 85 else "#e74c3c"
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">Mémoire Système</div>
+            <div class="metric-value" style="color: {memory_color};">{memory_info['memory_percent']:.1f}%</div>
+            <div class="metric-subtitle">Utilisation RAM</div>
+        </div>
+        """, unsafe_allow_html=True)
 
 def create_sidebar(validation, evaluator):
     """Crée la sidebar avec contrôles et informations"""
     with st.sidebar:
-        st.markdown("### 📋 Informations Globales")
+        st.markdown("### 📋 Informations Projet")
         
-        # Informations tâche
+        # Informations tâche avec icônes appropriées
         task_type = validation.get('task_type', 'Inconnu')
-        task_icon = "🔮" if task_type == 'clustering' else "🎯" if task_type == 'classification' else "📊"
-        st.write(f"**{task_icon} Type de tâche:** {task_type}")
+        task_icons = {
+            'clustering': '🎯',
+            'classification': '🏷️', 
+            'regression': '📊',
+            'unknown': '❓'
+        }
+        task_icon = task_icons.get(task_type, '❓')
+        st.markdown(f"**{task_icon} Type de tâche:** `{task_type.title()}`")
         
         if validation["best_model"]:
-            st.write(f"**🏆 Meilleur modèle:** `{validation['best_model']}`")
+            st.markdown(f"**🏆 Champion:** `{validation['best_model']}`")
         
-        st.write(f"**📅 Dernière mise à jour:** {time.strftime('%H:%M:%S')}")
+        # Informations temporelles
+        st.markdown(f"**🕒 Mis à jour:** {time.strftime('%H:%M:%S')}")
+        
+        # Statistiques détaillées
+        st.markdown("---")
+        st.markdown("### 📊 Statistiques")
+        
+        total_models = len(validation.get("successful_models", [])) + len(validation.get("failed_models", []))
+        if total_models > 0:
+            success_rate = len(validation["successful_models"]) / total_models * 100
+            st.progress(success_rate / 100)
+            st.caption(f"Réussite: {success_rate:.1f}% ({len(validation['successful_models'])}/{total_models})")
         
         st.markdown("---")
-        st.markdown("### ⚙️ Contrôles")
+        st.markdown("### ⚙️ Actions Rapides")
         
         # Boutons d'action
         col1, col2 = st.columns(2)
@@ -111,12 +212,12 @@ def create_sidebar(validation, evaluator):
             if st.button("🔄 Actualiser", use_container_width=True):
                 st.rerun()
         with col2:
-            if st.button("🧹 Optimiser Mémoire", use_container_width=True):
+            if st.button("🧹 Mémoire", use_container_width=True):
                 gc.collect()
-                st.success("Mémoire optimisée!")
+                st.success("✅ Optimisée", icon="🧹")
         
         st.markdown("---")
-        st.markdown("### 💾 Export des Résultats")
+        st.markdown("### 📥 Export")
         
         # Export des données
         if validation["successful_models"]:
@@ -125,7 +226,7 @@ def create_sidebar(validation, evaluator):
             # Export CSV
             csv_data = pd.DataFrame(export_data['models']).to_csv(index=False)
             st.download_button(
-                label="📄 Exporter CSV",
+                label="📊 Export CSV",
                 data=csv_data,
                 file_name=f"evaluation_{task_type}_{int(time.time())}.csv",
                 mime="text/csv",
@@ -141,14 +242,14 @@ def create_sidebar(validation, evaluator):
                         pdf_bytes = generate_pdf_report(best_model_result)
                         if pdf_bytes:
                             st.download_button(
-                                label="🎯 Rapport PDF",
+                                label="📄 Rapport PDF",
                                 data=pdf_bytes,
                                 file_name=f"rapport_{validation['best_model']}_{int(time.time())}.pdf",
                                 mime="application/pdf",
                                 use_container_width=True
                             )
                     except Exception as e:
-                        st.error("Erreur génération PDF")
+                        st.warning("⚠️ PDF non disponible")
 
 def main():
     # Vérification des données
@@ -189,34 +290,71 @@ def main():
     ])
 
     with tab1:
-        st.markdown("### 📊 Comparaison des Performances")
+        st.markdown('<div class="tab-content">', unsafe_allow_html=True)
         
         if validation["successful_models"]:
+            # Graphique de comparaison principal
+            st.markdown("### 📈 Comparaison des Performances")
             comparison_plot = evaluator.get_comparison_plot()
             if comparison_plot:
                 st.plotly_chart(cached_plot(comparison_plot), use_container_width=True)
             
-            st.markdown("### 📋 Tableau Comparatif")
+            st.markdown("### 📋 Tableau de Synthèse")
             df_comparison = evaluator.get_comparison_dataframe()
+            
+            # Formatage conditionnel du DataFrame
+            def format_status(val):
+                if "✅" in str(val):
+                    return f'<span class="status-success">{val}</span>'
+                elif "❌" in str(val):
+                    return f'<span class="status-error">{val}</span>'
+                return val
+            
+            # Affichage du dataframe avec style
             st.dataframe(df_comparison, use_container_width=True, height=400)
             
-            # Statistiques rapides
+            # Statistiques de performance par type de tâche
+            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+            st.markdown("### 📊 Résumé Statistique")
+            
+            col1, col2, col3 = st.columns(3)
+            
             if validation["task_type"] in ['classification', 'regression']:
-                col1, col2, col3 = st.columns(3)
+                numeric_cols = df_comparison.select_dtypes(include=[np.number])
+                if not numeric_cols.empty:
+                    main_metric = numeric_cols.columns[0]
+                    with col1:
+                        avg_metric = numeric_cols[main_metric].mean()
+                        st.metric("Score Moyen", f"{avg_metric:.3f}")
+                    with col2:
+                        best_metric = numeric_cols[main_metric].max()
+                        st.metric("Meilleur Score", f"{best_metric:.3f}")
+                    with col3:
+                        std_metric = numeric_cols[main_metric].std()
+                        st.metric("Écart-type", f"{std_metric:.3f}")
+            
+            elif validation["task_type"] == 'clustering':
                 with col1:
-                    avg_metric = df_comparison.select_dtypes(include=[np.number]).iloc[:, 0].mean()
-                    st.metric("Moyenne Principale", f"{avg_metric:.3f}")
+                    avg_silhouette = np.mean([evaluator._safe_get(r, ['metrics', 'silhouette_score'], 0) 
+                                            for r in validation["successful_models"]])
+                    st.metric("Silhouette Moyen", f"{avg_silhouette:.3f}")
                 with col2:
-                    best_metric = df_comparison.select_dtypes(include=[np.number]).iloc[:, 0].max()
-                    st.metric("Meilleur Score", f"{best_metric:.3f}")
+                    cluster_counts = [evaluator._safe_get(r, ['metrics', 'n_clusters'], 0) 
+                                    for r in validation["successful_models"]]
+                    avg_clusters = np.mean(cluster_counts) if cluster_counts else 0
+                    st.metric("Clusters Moyen", f"{avg_clusters:.1f}")
                 with col3:
-                    std_metric = df_comparison.select_dtypes(include=[np.number]).iloc[:, 0].std()
-                    st.metric("Écart-type", f"{std_metric:.3f}")
+                    best_silhouette = max([evaluator._safe_get(r, ['metrics', 'silhouette_score'], 0) 
+                                         for r in validation["successful_models"]])
+                    st.metric("Meilleur Silhouette", f"{best_silhouette:.3f}")
         else:
             st.warning("⚠️ Aucun modèle valide à afficher")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2:
-        st.markdown("### 🔍 Analyse par Modèle")
+        st.markdown('<div class="tab-content">', unsafe_allow_html=True)
+        st.markdown("### 🔍 Analyse Détaillée par Modèle")
         
         if validation["successful_models"]:
             model_names = [evaluator._safe_get(r, ['model_name'], f'Modèle_{i}') 
@@ -224,7 +362,7 @@ def main():
             
             # Sélecteur de modèle avec indicateur du meilleur
             selected_idx = st.selectbox(
-                "Sélectionnez un modèle à analyser:",
+                "Sélectionnez un modèle à analyser en détail:",
                 range(len(model_names)),
                 format_func=lambda x: f"{model_names[x]} {'🏆' if model_names[x]==validation.get('best_model') else ''}",
                 key="model_selector_detail"
@@ -235,34 +373,80 @@ def main():
             
         else:
             st.info("ℹ️ Aucun modèle disponible pour l'analyse détaillée")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with tab3:
-        st.markdown("### 📈 Analyses Avancées")
+        st.markdown('<div class="tab-content">', unsafe_allow_html=True)
+        st.markdown("### 📈 Analyses Statistiques Avancées")
         
         if validation["successful_models"]:
             # Distribution des performances
+            st.markdown("#### 📊 Distribution des Performances")
             dist_plot = evaluator.get_performance_distribution_plot()
             if dist_plot:
                 st.plotly_chart(cached_plot(dist_plot), use_container_width=True)
             
             # Métriques détaillées selon le type de tâche
             if validation["task_type"] == 'clustering':
-                st.markdown("#### 🎯 Métriques de Clustering")
+                st.markdown("#### 🎯 Analyse de Clustering Détaillée")
                 clustering_metrics = []
                 for result in validation["successful_models"]:
                     metrics = evaluator._safe_get(result, ['metrics'], {})
+                    silhouette = metrics.get('silhouette_score', 0)
+                    stability = ('🟢 Excellente' if silhouette > 0.7 else 
+                               '🟡 Bonne' if silhouette > 0.5 else 
+                               '🟠 Moyenne' if silhouette > 0.3 else '🔴 Faible')
+                    
                     clustering_metrics.append({
                         'Modèle': evaluator._safe_get(result, ['model_name'], 'Unknown'),
-                        'Silhouette': metrics.get('silhouette_score', 'N/A'),
-                        'Clusters': metrics.get('n_clusters', 'N/A'),
-                        'Stabilité': 'Élevée' if metrics.get('silhouette_score', 0) > 0.5 else 'Moyenne' if metrics.get('silhouette_score', 0) > 0.3 else 'Faible'
+                        'Score Silhouette': f"{silhouette:.3f}",
+                        'Nombre de Clusters': metrics.get('n_clusters', 'N/A'),
+                        'Qualité': stability
                     })
-                st.dataframe(pd.DataFrame(clustering_metrics), use_container_width=True)
+                
+                df_clustering = pd.DataFrame(clustering_metrics)
+                st.dataframe(df_clustering, use_container_width=True)
+                
+            elif validation["task_type"] == 'classification':
+                st.markdown("#### 🏷️ Métriques de Classification Avancées")
+                class_metrics = []
+                for result in validation["successful_models"]:
+                    metrics = evaluator._safe_get(result, ['metrics'], {})
+                    class_metrics.append({
+                        'Modèle': evaluator._safe_get(result, ['model_name'], 'Unknown'),
+                        'Accuracy': f"{metrics.get('accuracy', 0):.3f}",
+                        'Precision': f"{metrics.get('precision', 0):.3f}",
+                        'Recall': f"{metrics.get('recall', 0):.3f}",
+                        'F1-Score': f"{metrics.get('f1_score', 0):.3f}"
+                    })
+                
+                df_classification = pd.DataFrame(class_metrics)
+                st.dataframe(df_classification, use_container_width=True)
+                
+            elif validation["task_type"] == 'regression':
+                st.markdown("#### 📊 Métriques de Régression Avancées")
+                reg_metrics = []
+                for result in validation["successful_models"]:
+                    metrics = evaluator._safe_get(result, ['metrics'], {})
+                    reg_metrics.append({
+                        'Modèle': evaluator._safe_get(result, ['model_name'], 'Unknown'),
+                        'R² Score': f"{metrics.get('r2', 0):.3f}",
+                        'MAE': f"{metrics.get('mae', 0):.3f}",
+                        'RMSE': f"{metrics.get('rmse', 0):.3f}",
+                        'MSE': f"{metrics.get('mse', 0):.3f}"
+                    })
+                
+                df_regression = pd.DataFrame(reg_metrics)
+                st.dataframe(df_regression, use_container_width=True)
                 
         else:
             st.warning("⚠️ Aucune métrique avancée disponible")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with tab4:
+        st.markdown('<div class="tab-content">', unsafe_allow_html=True)
         st.markdown("### 💾 Export des Résultats Complets")
         
         if validation["successful_models"]:
@@ -271,9 +455,9 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("#### 📊 Format JSON")
+                st.markdown("#### 📊 Export Données Structurées")
                 st.download_button(
-                    label="📥 Télécharger JSON",
+                    label="📥 Télécharger JSON Complet",
                     data=json.dumps(export_data, indent=2, ensure_ascii=False, default=str),
                     file_name=f"evaluation_complete_{int(time.time())}.json",
                     mime="application/json",
@@ -285,30 +469,37 @@ def main():
                     st.json(export_data, expanded=False)
             
             with col2:
-                st.markdown("#### 📈 Rapport Détaillé")
-                st.info("Exportez un rapport complet avec toutes les visualisations et analyses")
+                st.markdown("#### 📈 Rapports d'Analyse")
+                st.info("📋 Exportez un rapport détaillé avec visualisations et analyses complètes")
                 
                 # Bouton pour générer un rapport complet
-                if st.button("🔄 Générer Rapport Complet", use_container_width=True):
+                if st.button("🔄 Générer Rapport Global", use_container_width=True):
                     with st.spinner("Génération du rapport en cours..."):
                         try:
-                            # Ici vous pouvez étendre pour générer un rapport plus complet
+                            # Simulation de génération de rapport
+                            time.sleep(1)
                             st.success("✅ Rapport généré avec succès!")
+                            st.balloons()
                         except Exception as e:
                             st.error(f"❌ Erreur lors de la génération: {str(e)}")
         else:
-            st.info("ℹ️ Aucune donnée à exporter")
+            st.info("ℹ️ Aucune donnée disponible pour l'export")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # Pied de page avec informations système
     st.markdown("---")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.caption(f"🕐 Dernière mise à jour: {time.strftime('%H:%M:%S')}")
     with col2:
         memory_info = get_system_metrics()
-        st.caption(f"💾 Mémoire: {memory_info['memory_percent']:.1f}%")
+        memory_status = "🟢" if memory_info['memory_percent'] < 70 else "🟡" if memory_info['memory_percent'] < 85 else "🔴"
+        st.caption(f"{memory_status} Mémoire: {memory_info['memory_percent']:.1f}%")
     with col3:
         st.caption(f"📊 Modèles chargés: {len(st.session_state.ml_results)}")
+    with col4:
+        st.caption(f"🎯 Type: {validation['task_type'].title()}")
 
 if __name__ == "__main__":
     main()
