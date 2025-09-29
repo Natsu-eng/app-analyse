@@ -13,7 +13,7 @@ import os
 import time
 import gc
 import psutil
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple
 import warnings
 from sklearn.exceptions import ConvergenceWarning
 import json
@@ -808,7 +808,7 @@ def train_models(
                         "label_encoder": label_encoder,
                         "feature_names": feature_list,
                         "task_type": task_type,
-                        "timestamp": timestamp
+                        "timestamp": timestamp,
                     }
 
                     # Ajout des données pour visualisations (avec gestion mémoire)
@@ -829,9 +829,11 @@ def train_models(
                             if X_test is not None and len(X_test) > 0:
                                 X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42)
                                 result["X_sample"] = X_sample
-                                if X_train is not None and len(X_train) > 0:
-                                    result["X_train"] = X_train.sample(n=min(max_samples, len(X_train)), random_state=42)
-                                    result["y_train"] = y_train.loc[result["X_train"].index]
+                                # Ajout de X_test, y_test, X_train, y_train pour les visualisations
+                                result["X_test"] = X_test
+                                result["y_test"] = y_test
+                                result["X_train"] = X_train
+                                result["y_train"] = y_train
                                 if task_type == 'classification' and label_encoder is not None:
                                     result["class_names"] = label_encoder.classes_.tolist()
 

@@ -4,11 +4,12 @@ import streamlit as st
 import pandas as pd
 import time
 import json
-import gc
-import plotly.graph_objects as go
 from ml.evaluation.visualization import ModelEvaluationVisualizer
 from ml.evaluation.metrics_calculation import get_system_metrics, EvaluationMetrics
 from utils.report_generator import generate_pdf_report
+
+from logging import getLogger
+logger = getLogger(__name__)
 
 # Configuration PyArrow
 os.environ["PANDAS_USE_PYARROW"] = "0"
@@ -263,86 +264,148 @@ def display_model_details(evaluator, model_result, task_type):
 
     # Visualisations spécifiques
     model_name = model_result.get('model_name', 'Unknown')
+    model = model_result.get('model')
+    logger.info(f"📊 Affichage des détails pour {model_name}, task_type={task_type}")
 
     # Importance des features (classification et régression)
-    if task_type in ['classification', 'regression'] and model_result.get('model') and model_result.get('feature_names'):
+    if task_type in ['classification', 'regression'] and model and model_result.get('feature_names'):
         st.markdown("#### Importance des Features")
-        feature_plot = evaluator.create_feature_importance_plot(model_result['model'], model_result['feature_names'])
+        feature_plot = evaluator.create_feature_importance_plot(model, model_result['feature_names'])
         if feature_plot:
-            st.plotly_chart(cached_plot(feature_plot, f"feature_importance_{model_name}"), width='stretch')
+            st.plotly_chart(feature_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher l’importance des features")
+            logger.warning(f"⚠️ Échec création importance des features pour {model_name}")
 
     # SHAP Summary Plot (classification et régression)
-    if task_type in ['classification', 'regression'] and model_result.get('model') and model_result.get('X_sample'):
+    if task_type in ['classification', 'regression'] and model and model_result.get('X_sample') is not None and not model_result.get('X_sample').empty:
         st.markdown("#### Analyse SHAP")
         shap_plot = evaluator.create_shap_plot(model_result)
         if shap_plot:
-            st.plotly_chart(cached_plot(shap_plot, f"shap_plot_{model_name}"), width='stretch')
+            st.plotly_chart(shap_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher le SHAP plot")
+            logger.warning(f"⚠️ Échec création SHAP plot pour {model_name}")
 
-    # Classification : Matrice de confusion, Courbe ROC, Courbe PR
-    if task_type == 'classification' and model_result.get('model') and model_result.get('X_test') is not None and model_result.get('y_test') is not None:
+    # Nouvelles visualisations pour classification
+    if task_type == 'classification' and model and model_result.get('X_test') is not None and model_result.get('y_test') is not None:
+        # Matrice de confusion
         st.markdown("#### Matrice de Confusion")
         cm_plot = evaluator.create_confusion_matrix_plot(model_result)
         if cm_plot:
-            st.plotly_chart(cached_plot(cm_plot, f"confusion_matrix_{model_name}"), width='stretch')
+            st.plotly_chart(cm_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher la matrice de confusion")
+            logger.warning(f"⚠️ Échec création matrice de confusion pour {model_name}: X_test={model_result.get('X_test') is not None}, y_test={model_result.get('y_test') is not None}")
 
-        st.markdown("#### Courbe ROC")
-        roc_plot = evaluator.create_roc_curve_plot(model_result)
-        if roc_plot:
-            st.plotly_chart(cached_plot(roc_plot, f"roc_curve_{model_name}"), width='stretch')
+        # Courbe ROC
+        if hasattr(model, 'predict_proba'):
+            st.markdown("#### Courbe ROC")
+            roc_plot = evaluator.create_roc_curve_plot(model_result)
+            if roc_plot:
+                st.plotly_chart(roc_plot, width='stretch')
+            else:
+                st.warning("⚠️ Impossible d’afficher la courbe ROC")
+                logger.warning(f"⚠️ Échec création courbe ROC pour {model_name}")
         else:
-            st.warning("⚠️ Impossible d’afficher la courbe ROC")
+            st.warning("⚠️ Modèle ne supporte pas predict_proba pour la courbe ROC")
+            logger.warning(f"⚠️ Modèle {model_name} sans predict_proba")
 
-        st.markdown("#### Courbe de Précision-Rappel")
-        pr_plot = evaluator.create_precision_recall_curve_plot(model_result)
-        if pr_plot:
-            st.plotly_chart(cached_plot(pr_plot, f"pr_curve_{model_name}"), width='stretch')
+        # Courbe de Précision-Rappel
+        if hasattr(model, 'predict_proba'):
+            st.markdown("#### Courbe de Précision-Rappel")
+            pr_plot = evaluator.create_precision_recall_curve_plot(model_result)
+            if pr_plot:
+                st.plotly_chart(pr_plot, width='stretch')
+            else:
+                st.warning("⚠️ Impossible d’afficher la courbe de précision-rappel")
+                logger.warning(f"⚠️ Échec création courbe PR pour {model_name}")
         else:
-            st.warning("⚠️ Impossible d’afficher la courbe de précision-rappel")
+            st.warning("⚠️ Modèle ne supporte pas predict_proba pour la courbe PR")
+            logger.warning(f"⚠️ Modèle {model_name} sans predict_proba")
+
+        # Courbe d’apprentissage
+        if model_result.get('X_train') is not None and model_result.get('y_train') is not None:
+            st.markdown("#### Courbe d’Apprentissage")
+            learning_plot = evaluator.create_learning_curve_plot(model_result)
+            if learning_plot:
+                st.plotly_chart(learning_plot, width='stretch')
+            else:
+                st.warning("⚠️ Impossible d’afficher la courbe d’apprentissage")
+                logger.warning(f"⚠️ Échec création courbe d’apprentissage pour {model_name}")
+        else:
+            st.warning("⚠️ Données d’entraînement (X_train, y_train) manquantes pour la courbe d’apprentissage")
+            logger.warning(f"⚠️ X_train ou y_train manquant pour {model_name}")
+
+        # Distribution des probabilités prédites
+        if hasattr(model, 'predict_proba'):
+            st.markdown("#### Distribution des Probabilités Prédites (Classe Positive)")
+            proba_plot = evaluator.create_predicted_proba_distribution_plot(model_result)
+            if proba_plot:
+                st.plotly_chart(proba_plot, width='stretch')
+            else:
+                st.warning("⚠️ Impossible d’afficher la distribution des probabilités")
+                logger.warning(f"⚠️ Échec création distribution probabilités pour {model_name}")
+        else:
+            st.warning("⚠️ Modèle ne supporte pas predict_proba pour la distribution des probabilités")
+            logger.warning(f"⚠️ Modèle {model_name} sans predict_proba")
+
+        # Heatmap de corrélation des features
+        if model_result.get('X_sample') is not None and not model_result.get('X_sample').empty:
+            st.markdown("#### Heatmap de Corrélation des Features")
+            corr_plot = evaluator.create_feature_correlation_heatmap(model_result)
+            if corr_plot:
+                st.plotly_chart(corr_plot, width='stretch')
+            else:
+                st.warning("⚠️ Impossible d’afficher la heatmap de corrélation")
+                logger.warning(f"⚠️ Échec création heatmap corrélation pour {model_name}")
+        else:
+            st.warning("⚠️ Données (X_sample) manquantes pour la heatmap de corrélation")
+            logger.warning(f"⚠️ X_sample manquant pour {model_name}")
 
     # Régression : Graphique des résidus, Prédictions vs. Réelles
-    if task_type == 'regression' and model_result.get('model') and model_result.get('X_test') is not None and model_result.get('y_test') is not None:
+    if task_type == 'regression' and model and model_result.get('X_test') is not None and model_result.get('y_test') is not None:
         st.markdown("#### Graphique des Résidus")
         residuals_plot = evaluator.create_residuals_plot(model_result)
         if residuals_plot:
-            st.plotly_chart(cached_plot(residuals_plot, f"residuals_plot_{model_name}"), width='stretch')
+            st.plotly_chart(residuals_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher le graphique des résidus")
+            logger.warning(f"⚠️ Échec création graphique résidus pour {model_name}")
 
         st.markdown("#### Prédictions vs. Réelles")
         pred_vs_actual_plot = evaluator.create_predicted_vs_actual_plot(model_result)
         if pred_vs_actual_plot:
-            st.plotly_chart(cached_plot(pred_vs_actual_plot, f"pred_vs_actual_{model_name}"), width='stretch')
+            st.plotly_chart(pred_vs_actual_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher le graphique prédictions vs. réelles")
+            logger.warning(f"⚠️ Échec création graphique prédictions vs. réelles pour {model_name}")
 
     # Clustering : Scatter plot, Silhouette plot, Dispersion intra-cluster
     if task_type == 'clustering' and model_result.get('X_sample') is not None and model_result.get('labels') is not None:
         st.markdown("#### Visualisation des Clusters")
         cluster_plot = evaluator.create_cluster_scatter_plot(model_result)
         if cluster_plot:
-            st.plotly_chart(cached_plot(cluster_plot, f"cluster_plot_{model_name}"), width='stretch')
+            st.plotly_chart(cluster_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher le scatter plot des clusters")
+            logger.warning(f"⚠️ Échec création scatter plot clusters pour {model_name}")
         
         st.markdown("#### Analyse de Silhouette")
         silhouette_plot = evaluator.create_silhouette_plot(model_result)
         if silhouette_plot:
-            st.plotly_chart(cached_plot(silhouette_plot, f"silhouette_plot_{model_name}"), width='stretch')
+            st.plotly_chart(silhouette_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher le silhouette plot")
+            logger.warning(f"⚠️ Échec création silhouette plot pour {model_name}")
 
         st.markdown("#### Dispersion Intra-Cluster")
         intra_cluster_plot = evaluator.create_intra_cluster_distance_plot(model_result)
         if intra_cluster_plot:
-            st.plotly_chart(cached_plot(intra_cluster_plot, f"intra_cluster_{model_name}"), width='stretch')
+            st.plotly_chart(intra_cluster_plot, width='stretch')
         else:
             st.warning("⚠️ Impossible d’afficher le graphique de dispersion intra-cluster")
+            logger.warning(f"⚠️ Échec création dispersion intra-cluster pour {model_name}")
 
 def main():
     if 'ml_results' not in st.session_state or not st.session_state.ml_results:

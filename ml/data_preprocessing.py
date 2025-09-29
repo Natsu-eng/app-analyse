@@ -16,10 +16,9 @@ from sklearn.preprocessing import (
 )
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.exceptions import ConvergenceWarning
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional
 import warnings
 import pickle
-import gc
 
 # Configuration du logging
 logger = logging.getLogger(__name__)

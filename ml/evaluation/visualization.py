@@ -6,13 +6,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
 import logging
-import gc
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional
 from functools import wraps
 import concurrent.futures
-import uuid
-import base64
-from io import BytesIO
 
 # Configuration du logging
 logger = logging.getLogger(__name__)
@@ -50,6 +46,8 @@ try:
     from sklearn.decomposition import PCA
     from sklearn.metrics import silhouette_samples, silhouette_score
     from sklearn.model_selection import learning_curve
+    from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve, auc
+    from sklearn.metrics.pairwise import euclidean_distances
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -216,6 +214,23 @@ def _format_metric_value(value: Any) -> str:
         return str(value)
     except (ValueError, TypeError):
         return str(value)
+
+def _export_plot_to_png(fig: go.Figure) -> bytes:
+    """
+    Convertit un graphique Plotly en PNG pour l'export.
+    
+    Args:
+        fig: Figure Plotly à exporter
+        
+    Returns:
+        Bytes du fichier PNG
+    """
+    try:
+        img_bytes = fig.to_image(format="png", width=1200, height=600, scale=2)
+        return img_bytes
+    except Exception as e:
+        logger.error(f"❌ Export PNG échoué: {e}")
+        return b""
 
 # =============================
 # Classe principale
@@ -670,7 +685,6 @@ class ModelEvaluationVisualizer:
                     color_rgb = cm.nipy_spectral(float(i) / len(unique_labels))
                     color = f'rgb({int(color_rgb[0]*255)},{int(color_rgb[1]*255)},{int(color_rgb[2]*255)})'
                 else:
-                    # Fallback colors
                     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
                     color = colors[i % len(colors)]
                 
@@ -1056,6 +1070,533 @@ class ModelEvaluationVisualizer:
         except Exception as e:
             logger.error(f"❌ Scatter plot clusters échoué: {e}")
             return _create_empty_plot(f"Erreur visualisation clusters: {str(e)}")
+
+    @monitor_evaluation_operation
+    @timeout(seconds=60)
+    def create_confusion_matrix_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """Crée une matrice de confusion pour les tâches de classification."""
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour la matrice de confusion")
+
+            model = _safe_get(model_result, ['model'])
+            X_test = _safe_get(model_result, ['X_test'])
+            y_test = _safe_get(model_result, ['y_test'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+
+            if model is None or X_test is None or y_test is None:
+                return _create_empty_plot("Données manquantes (X_test, y_test ou modèle)")
+
+            # Sécurisation de y_test en array 1D
+            if isinstance(y_test, (pd.Series, pd.DataFrame)):
+                y_test = y_test.values.ravel()
+            else:
+                y_test = np.array(y_test).ravel()
+
+            # Prédictions
+            y_pred = model.predict(X_test)
+
+            # Matrice de confusion
+            cm = confusion_matrix(y_test, y_pred)
+            class_names = np.unique(y_test).astype(str)
+
+            fig = go.Figure(data=go.Heatmap(
+                z=cm,
+                x=class_names,
+                y=class_names,
+                text=cm,
+                texttemplate="%{text}",
+                colorscale='Blues',
+                hovertemplate='Vrai: %{y}<br>Prédit: %{x}<br>Count: %{z}<extra></extra>'
+            ))
+
+            fig.update_layout(
+                title=f"Matrice de Confusion - {model_name}",
+                xaxis_title="Classe Prédite",
+                yaxis_title="Classe Réelle",
+                height=500,
+                template="plotly_white"
+            )
+
+            logger.info(f"✅ Matrice de confusion créée pour {model_name}")
+            return fig
+
+        except Exception as e:
+            logger.error(f"❌ Matrice de confusion échouée: {e}")
+            return _create_empty_plot(f"Erreur matrice de confusion: {str(e)}")
+
+    @monitor_evaluation_operation
+    @timeout(seconds=60)
+    def create_roc_curve_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """Crée une courbe ROC pour les tâches de classification binaire."""
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour la courbe ROC")
+
+            model = _safe_get(model_result, ['model'])
+            X_test = _safe_get(model_result, ['X_test'])
+            y_test = _safe_get(model_result, ['y_test'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+
+            if model is None or X_test is None or y_test is None:
+                return _create_empty_plot("Données manquantes (X_test, y_test ou modèle)")
+
+            if not hasattr(model, 'predict_proba'):
+                return _create_empty_plot("Modèle ne supporte pas predict_proba")
+
+            # Sécurisation de y_test en array 1D
+            if isinstance(y_test, (pd.Series, pd.DataFrame)):
+                y_test = y_test.values.ravel()
+            else:
+                y_test = np.array(y_test).ravel()
+
+            # Probabilités
+            y_score = model.predict_proba(X_test)
+
+            if y_score.shape[1] == 2:  # binaire
+                y_score = y_score[:, 1]
+            else:
+                return _create_empty_plot("Courbe ROC supportée uniquement pour classification binaire")
+
+            # Courbe ROC
+            fpr, tpr, _ = roc_curve(y_test, y_score)
+            roc_auc = auc(fpr, tpr)
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=fpr, y=tpr,
+                mode='lines',
+                line=dict(color='#2ecc71', width=2),
+                name=f'ROC (AUC = {roc_auc:.3f})',
+                hovertemplate='FPR: %{x:.3f}<br>TPR: %{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatter(
+                x=[0, 1], y=[0, 1],
+                mode='lines',
+                line=dict(color='gray', dash='dash'),
+                showlegend=False
+            ))
+
+            fig.update_layout(
+                title=f"Courbe ROC - {model_name}",
+                xaxis_title="Taux de Faux Positifs (FPR)",
+                yaxis_title="Taux de Vrais Positifs (TPR)",
+                height=500,
+                template="plotly_white"
+            )
+
+            logger.info(f"✅ Courbe ROC créée pour {model_name} avec AUC={roc_auc:.3f}")
+            return fig
+
+        except Exception as e:
+            logger.error(f"❌ Courbe ROC échouée: {e}")
+            return _create_empty_plot(f"Erreur courbe ROC: {str(e)}")
+
+    @monitor_evaluation_operation
+    @timeout(seconds=60)
+    def create_precision_recall_curve_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """Crée une courbe de précision-rappel pour les tâches de classification binaire."""
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour la courbe PR")
+
+            model = _safe_get(model_result, ['model'])
+            X_test = _safe_get(model_result, ['X_test'])
+            y_test = _safe_get(model_result, ['y_test'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+
+            if model is None or X_test is None or y_test is None:
+                return _create_empty_plot("Données manquantes (X_test, y_test ou modèle)")
+
+            if not hasattr(model, 'predict_proba'):
+                return _create_empty_plot("Modèle ne supporte pas predict_proba")
+
+            # Sécurisation de y_test en array 1D
+            if isinstance(y_test, (pd.Series, pd.DataFrame)):
+                y_test = y_test.values.ravel()
+            else:
+                y_test = np.array(y_test).ravel()
+
+            # Probabilités
+            y_score = model.predict_proba(X_test)
+
+            if y_score.shape[1] == 2:  # binaire
+                y_score = y_score[:, 1]
+            else:
+                return _create_empty_plot("Courbe PR supportée uniquement pour classification binaire")
+
+            # Courbe PR
+            precision, recall, _ = precision_recall_curve(y_test, y_score)
+            pr_auc = auc(recall, precision)
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=recall, y=precision,
+                mode='lines',
+                line=dict(color='#3498db', width=2),
+                name=f'PR (AUC = {pr_auc:.3f})',
+                hovertemplate='Rappel: %{x:.3f}<br>Précision: %{y:.3f}<extra></extra>'
+            ))
+
+            fig.update_layout(
+                title=f"Courbe de Précision-Rappel - {model_name}",
+                xaxis_title="Rappel",
+                yaxis_title="Précision",
+                height=500,
+                template="plotly_white"
+            )
+
+            logger.info(f"✅ Courbe PR créée pour {model_name} avec AUC={pr_auc:.3f}")
+            return fig
+
+        except Exception as e:
+            logger.error(f"❌ Courbe PR échouée: {e}")
+            return _create_empty_plot(f"Erreur courbe PR: {str(e)}")
+
+    @monitor_evaluation_operation
+    @timeout(seconds=60)
+    def create_residuals_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Crée un graphique des résidus pour les tâches de régression.
+        """
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour le graphique des résidus")
+
+            model = _safe_get(model_result, ['model'])
+            X_test = _safe_get(model_result, ['X_test'])
+            y_test = _safe_get(model_result, ['y_test'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+
+            if model is None or X_test is None or y_test is None:
+                return _create_empty_plot("Données manquantes (X_test, y_test ou modèle)")
+
+            X_test = pd.DataFrame(X_test) if not isinstance(X_test, pd.DataFrame) else X_test
+            y_test = pd.Series(y_test) if not isinstance(y_test, pd.Series) else y_test
+
+            y_pred = pd.Series(model.predict(X_test))
+            residuals = y_test - y_pred
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=y_pred,
+                y=residuals,
+                mode='markers',
+                marker=dict(color='#e74c3c', size=8, opacity=0.6),
+                name='Résidus'
+            ))
+
+            fig.add_hline(y=0, line_dash="dash", line_color="gray")
+
+            fig.update_layout(
+                title=f"Graphique des Résidus - {model_name}",
+                xaxis_title="Valeurs Prédites",
+                yaxis_title="Résidus (y_test - y_pred)",
+                height=500,
+                template="plotly_white",
+                showlegend=True
+            )
+
+            return fig
+
+        except Exception as e:
+            return _create_empty_plot(f"Erreur graphique des résidus: {str(e)}")
+
+    @monitor_evaluation_operation
+    @timeout(seconds=60)
+    def create_predicted_vs_actual_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Crée un graphique de prédictions vs. réelles pour les tâches de régression.
+        """
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour le graphique prédictions vs. réelles")
+
+            model = _safe_get(model_result, ['model'])
+            X_test = _safe_get(model_result, ['X_test'])
+            y_test = _safe_get(model_result, ['y_test'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+
+            if model is None or X_test is None or y_test is None:
+                return _create_empty_plot("Données manquantes (X_test, y_test ou modèle)")
+
+            # Convertir en DataFrame / Series pour compatibilité Plotly
+            X_test = pd.DataFrame(X_test) if not isinstance(X_test, pd.DataFrame) else X_test
+            y_test = pd.Series(y_test) if not isinstance(y_test, pd.Series) else y_test
+
+            y_pred = pd.Series(model.predict(X_test))
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=y_test,
+                y=y_pred,
+                mode='markers',
+                marker=dict(color='#2ecc71', size=8, opacity=0.6),
+                name='Prédictions'
+            ))
+
+            min_val = min(y_test.min(), y_pred.min())
+            max_val = max(y_test.max(), y_pred.max())
+            fig.add_trace(go.Scatter(
+                x=[min_val, max_val],
+                y=[min_val, max_val],
+                mode='lines',
+                line=dict(color='gray', dash='dash'),
+                name='y=x',
+                showlegend=False
+            ))
+
+            fig.update_layout(
+                title=f"Prédictions vs. Réelles - {model_name}",
+                xaxis_title="Valeurs Réelles",
+                yaxis_title="Valeurs Prédites",
+                height=500,
+                template="plotly_white",
+                showlegend=True
+            )
+
+            return fig
+
+        except Exception as e:
+            return _create_empty_plot(f"Erreur graphique prédictions vs. réelles: {str(e)}")
+
+    @monitor_evaluation_operation
+    @timeout(seconds=90)
+    def create_intra_cluster_distance_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Crée un graphique de dispersion intra-cluster pour le clustering.
+        
+        Args:
+            model_result: Résultat du modèle avec X_sample et labels
+            
+        Returns:
+            Figure Plotly de la dispersion intra-cluster
+        """
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour le graphique de dispersion intra-cluster")
+                
+            X = _safe_get(model_result, ['X_sample'])
+            labels = _safe_get(model_result, ['labels'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+            
+            if X is None or labels is None:
+                return _create_empty_plot("Données manquantes pour la dispersion intra-cluster")
+            
+            X = np.array(X)
+            labels = np.array(labels)
+            
+            # Filtrage des valeurs valides
+            valid_mask = ~np.isnan(labels) & (labels != -1)
+            if not np.any(valid_mask):
+                return _create_empty_plot("Aucune donnée valide")
+                
+            X = X[valid_mask]
+            labels = labels[valid_mask]
+            
+            unique_labels = np.unique(labels)
+            if len(unique_labels) < 2:
+                return _create_empty_plot("Au moins 2 clusters requis")
+            
+            # Calculer la distance moyenne intra-cluster
+            distances = []
+            for label in unique_labels:
+                cluster_points = X[labels == label]
+                if len(cluster_points) > 1:
+                    dist = np.mean(euclidean_distances(cluster_points))
+                else:
+                    dist = 0
+                distances.append(dist)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=[f'Cluster {int(label)}' for label in unique_labels],
+                y=distances,
+                marker_color='#3498db',
+                text=[f"{d:.3f}" for d in distances],
+                textposition='auto',
+                hovertemplate='Cluster: %{x}<br>Distance moyenne: %{y:.3f}<extra></extra>'
+            ))
+            
+            fig.update_layout(
+                title=f"Dispersion Intra-Cluster - {model_name}",
+                xaxis_title="Clusters",
+                yaxis_title="Distance Moyenne Intra-Cluster",
+                height=500,
+                template="plotly_white",
+                showlegend=False
+            )
+            
+            logger.info(f"✅ Graphique de dispersion intra-cluster créé pour {model_name}")
+            return fig
+            
+        except Exception as e:
+            logger.error(f"❌ Graphique de dispersion intra-cluster échoué: {e}")
+            return _create_empty_plot(f"Erreur graphique de dispersion intra-cluster: {str(e)}")
+
+    from sklearn.model_selection import learning_curve
+    @monitor_evaluation_operation
+    @timeout(seconds=120)
+    def create_learning_curve_plot(self, model_result):
+        """
+        Crée une courbe d'apprentissage pour un modèle supervisé.
+        Args:
+            model_result: Dictionnaire contenant 'model', 'X_train', 'y_train', 'task_type'
+        Returns:
+            Figure Plotly de la courbe d'apprentissage
+        """
+        try:
+            from sklearn.model_selection import learning_curve
+
+            model = model_result.get('model')
+            X_train = model_result.get('X_train')
+            y_train = model_result.get('y_train')
+            task_type = model_result.get('task_type', 'classification')
+            model_name = model_result.get('model_name', 'Modèle')
+
+            if not all([model, X_train is not None, y_train is not None]):
+                return _create_empty_plot("Données manquantes pour la courbe d'apprentissage")
+
+            scoring = 'accuracy' if task_type == 'classification' else 'r2'
+
+            train_sizes, train_scores, test_scores = learning_curve(
+                estimator=model,
+                X=X_train,
+                y=y_train,
+                cv=5,
+                scoring=scoring,
+                n_jobs=-1,
+                train_sizes=np.linspace(0.1, 1.0, 10)
+            )
+
+            train_mean = np.mean(train_scores, axis=1)
+            train_std = np.std(train_scores, axis=1)
+            test_mean = np.mean(test_scores, axis=1)
+            test_std = np.std(test_scores, axis=1)
+
+            fig = go.Figure()
+
+            # Courbes principales
+            fig.add_trace(go.Scatter(
+                x=train_sizes, y=train_mean,
+                mode="lines+markers",
+                name="Score Entraînement",
+                line=dict(color="#1f77b4"),
+                error_y=dict(type="data", array=train_std, visible=True)
+            ))
+            fig.add_trace(go.Scatter(
+                x=train_sizes, y=test_mean,
+                mode="lines+markers",
+                name="Score Validation",
+                line=dict(color="#ff7f0e"),
+                error_y=dict(type="data", array=test_std, visible=True)
+            ))
+
+            fig.update_layout(
+                title=f"Courbe d'apprentissage - {model_name}",
+                xaxis_title="Taille de l'ensemble d'entraînement",
+                yaxis_title="Score",
+                template="plotly_white",
+                height=500
+            )
+
+            logger.info(f"✅ Courbe d'apprentissage créée pour {model_name}")
+            return fig
+
+        except Exception as e:
+            logger.error(f"❌ Courbe d'apprentissage échouée: {e}")
+            return _create_empty_plot(f"Erreur création courbe d'apprentissage: {str(e)}")
+        
+    @monitor_evaluation_operation
+    @timeout(seconds=90)
+    def create_predicted_proba_distribution_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Crée un graphique de distribution des probabilités prédites pour un modèle de classification.
+        """
+        try:
+            model = model_result.get('model')
+            X_test = model_result.get('X_test')
+            model_name = model_result.get('model_name', 'Modèle')
+
+            if model is None or X_test is None:
+                return _create_empty_plot("Données manquantes pour distribution des probabilités")
+            if not hasattr(model, 'predict_proba'):
+                return _create_empty_plot("Modèle ne supporte pas predict_proba")
+
+            # Convertir X_test en DataFrame si ce n'est pas déjà un DataFrame
+            if not isinstance(X_test, pd.DataFrame):
+                X_test = pd.DataFrame(X_test)
+
+            y_proba = model.predict_proba(X_test)
+
+            fig = go.Figure()
+            # Binaire
+            if y_proba.shape[1] == 2:
+                fig.add_trace(go.Histogram(x=y_proba[:, 1], nbinsx=20, name='Classe 1', opacity=0.7, marker_color='#2ecc71'))
+                fig.add_trace(go.Histogram(x=y_proba[:, 0], nbinsx=20, name='Classe 0', opacity=0.7, marker_color='#e74c3c'))
+            # Multi-classes
+            else:
+                for i in range(y_proba.shape[1]):
+                    fig.add_trace(go.Histogram(x=y_proba[:, i], nbinsx=20, name=f'Classe {i}', opacity=0.7))
+
+            fig.update_layout(
+                title=f"Distribution des probabilités prédites - {model_name}",
+                xaxis_title="Probabilité prédite",
+                yaxis_title="Nombre d'échantillons",
+                barmode='overlay',
+                template="plotly_white",
+                height=500
+            )
+            return fig
+
+        except Exception as e:
+            return _create_empty_plot(f"Erreur distribution probabilités: {str(e)}")
+
+    def create_feature_correlation_heatmap(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Crée une heatmap des corrélations entre features pour l'ensemble d'entraînement.
+        Args:
+            model_result: Dictionnaire contenant 'X_train', 'model_name'
+        Returns:
+            Figure Plotly de la matrice de corrélation
+        """
+        try:
+            X_train = model_result.get('X_train')
+            model_name = model_result.get('model_name', 'Modèle')
+
+            if X_train is None:
+                return _create_empty_plot("Données manquantes pour heatmap des corrélations")
+
+            # Convertir en DataFrame si ce n'est pas déjà le cas
+            if not isinstance(X_train, pd.DataFrame):
+                X_train = pd.DataFrame(X_train)
+
+            corr_matrix = X_train.corr()
+
+            fig = go.Figure(data=go.Heatmap(
+                z=corr_matrix.values,
+                x=corr_matrix.columns,
+                y=corr_matrix.columns,
+                colorscale='Viridis',
+                zmin=-1, zmax=1,
+                text=np.round(corr_matrix.values, 2),
+                texttemplate="%{text}",
+                hovertemplate='Feature %{x} vs %{y}: %{z:.2f}<extra></extra>'
+            ))
+
+            fig.update_layout(
+                title=f"Heatmap des corrélations - {model_name}",
+                template="plotly_white",
+                height=600
+            )
+
+            logger.info(f"✅ Heatmap des corrélations créée pour {model_name}")
+            return fig
+
+        except Exception as e:
+            logger.error(f"❌ Création heatmap corrélations échouée: {e}")
+            return _create_empty_plot(f"Erreur heatmap corrélations: {str(e)}")
+
 
     @monitor_evaluation_operation
     def get_export_data(self) -> Dict[str, Any]:
