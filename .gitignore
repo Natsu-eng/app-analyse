@@ -1,64 +1,37 @@
-# --- Python ---
+# Environments
+.env
+.venv
+venv/
+env/
+
+# Python cache
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg
-*.egg-info/
-.eggs/
-*.manifest
-*.spec
 
-# --- Environnements virtuels ---
-.venv/
-venv/
-ENV/
-.env
-env/
-.ipynb_checkpoints/
-
-# --- Streamlit cache ---
-.streamlit/
-**/.streamlit/
-.cache/
-**/.cache/
-
-# --- Fichiers temporaires / logs ---
-*.log
-*.tmp
-*.swp
-*.bak
-*.orig
-.DS_Store
-Thumbs.db
-
-# --- Jupyter Notebook ---
-.ipynb_checkpoints
-*.ipynb_checkpoints
-
-# --- VS Code / IDE ---
+# IDEs
 .vscode/
 .idea/
-*.code-workspace
 
-# --- Données sensibles ---
+# Streamlit
+.streamlit/
+
+# Logs & Artifacts
+logs/
+*.log
+mlflow_artifacts/
+models_output/
+
+# Data files
 *.csv
+*.parquet
 *.xlsx
 *.xls
-*.parquet
 *.json
-*.db
-*.sqlite
-*.h5
 
-# --- Tests ---
+# Dependencies
+.eggs/
+*.egg-info/
+
+# Testing
+.pytest_cache/
 .coverage
-htmlcov/
-.tox/
-.nox/
-pytest_cache/
-
-# --- Modèles et Historique ---
-*.joblib
-.history/

@@ -10,7 +10,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from ml.evaluation.visualization import ModelEvaluationVisualizer
+from src.evaluation.model_plots import ModelEvaluationVisualizer
 import logging
 from datetime import datetime
 import gc

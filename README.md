@@ -1,83 +1,79 @@
-# Application Data Science avec Streamlit
+# DataLab Pro 🧪
 
-Une application moderne, modulaire et évolutive construite avec Streamlit pour :
+**DataLab Pro** est une plateforme d'analyse de données et de Machine Learning automatisé construite avec Streamlit. Elle permet de charger, d'explorer, de prétraiter des données, ainsi que d'entraîner et d'évaluer des modèles de classification, de régression et de clustering.
 
-- **l'importation et l'exploration de données**
-- **l'analyse exploratoire univariée et bivariée**
-- **la modélisation (classification et régression)**
-- **la génération de rapports PDF**
+## Architecture
 
-Les graphiques interactifs sont basés sur **Plotly**.
+Le projet suit une architecture modulaire pour une séparation claire des responsabilités :
 
-## ⚙️ Installation et configuration
-
-### 1) Créer et activer un environnement virtuel
-```bash
-python -m venv .venv
-. .venv/Scripts/activate   # Windows PowerShell : .venv\Scripts\Activate.ps1
-source .venv/bin/activate  # Linux / macOS
+```
+app-analyse/
+├── src/
+│   ├── app/          # Interface utilisateur Streamlit
+│   ├── config/       # Configuration de l'application
+│   ├── data/         # Chargement et prétraitement des données
+│   ├── models/       # Logique d'entraînement et catalogue de modèles
+│   ├── evaluation/   # Calcul des métriques et visualisations
+│   ├── monitoring/   # Détection de dérive et surveillance
+│   └── shared/       # Modules partagés (état, logging)
+├── .env            # Fichier pour les variables d'environnement
+├── requirements.txt  # Dépendances Python
+├── Dockerfile        # Fichier de build Docker
+└── docker-compose.yml # Orchestration des services
 ```
 
-### 2) Installer les dépendances
-```bash
-pip install -r requirements.txt
-```
+## 🚀 Démarrage Rapide
 
-### 3) Exécuter l’application
-```bash
-streamlit run app.py
-```
+### 1. Prérequis
 
-## ✨ Fonctionnalités principales
+- Python 3.11+
+- Docker & Docker Compose
+- Un client PostgreSQL (optionnel, pour MLflow)
 
-### 📥 Importation des données
-- **Formats supportés** : CSV, Excel, Parquet, JSON
-- **Nettoyage automatique** : détection des types mixtes, suppression des doublons.
-- **Mise en cache** des données pour de meilleures performances
-- **Aperçu interactif** et sécurisé avec AgGrid
+### 2. Installation Locale
 
-### 📊 Analyse exploratoire
-- Détection automatique du **type de variable** (catégoriel, numérique, date, etc.)
-- Profil détaillé de chaque variable.
-- Analyse bivariée avec tests statistiques appropriés (Pearson, Chi², ANOVA).
-- Visualisations interactives : histogrammes, boxplots, scatterplots.
+1.  **Clonez le projet :**
+    ```bash
+    git clone <repository_url>
+    cd app-analyse
+    ```
 
-### 🤖 Modélisation et Évaluation
-- Pipeline d'entraînement **robuste** pour la classification.
-- **Gestion automatique** des cas limites : stratification, sur-échantillonnage (SMOTE).
-- Calcul **sécurisé** des métriques (Accuracy, F1-Score, AUC ROC) avec gestion des erreurs.
-- Tableau de bord d'évaluation complet avec graphiques (matrice de confusion, courbe ROC) et interprétabilité (SHAP).
+2.  **Créez un environnement virtuel et installez les dépendances :**
+    ```bash
+    python -m venv env
+    source env/bin/activate  # sur Windows: env\Scripts\activate
+    pip install -r requirements.txt
+    ```
 
-### 📄 Rapports
-- Génération de **rapports PDF** professionnels et complets.
-- Inclusion des métriques, graphiques et notes d'évaluation automatiques.
+3.  **Configurez l'environnement :**
+    - Créez un fichier `.env` à la racine du projet.
+    - Ajoutez vos configurations, notamment pour MLflow si vous l'utilisez :
+      ```env
+      MLFLOW_TRACKING_URI=postgresql+psycopg2://user:password@host:port/dbname
+      ```
 
-## 🧱 Structure du projet
-- `app.py` : Point d'entrée principal de l'application.
-- `pages/` : Contient les différentes pages de l'application Streamlit.
-- `components/` : Modules Streamlit réutilisables (sidebar, dashboard, evaluation...).
-- `utils/` : Fonctions utilitaires (chargement de données, analyse, prétraitement).
-- `ml/` : Logique du pipeline de machine learning (entraînement, narration).
-- `plots/` : Fonctions dédiées à la création des graphiques Plotly.
-- `assets/` : Fichiers statiques (CSS).
+4.  **Lancez l'application :**
+    ```bash
+    streamlit run src/app/main.py
+    ```
 
-## ⭐ Points forts
-- Interface **moderne et responsive** (style dashboard)
-- Visualisations **interactives** et **dynamiques** (Plotly)
-- Architecture **modulaire** et **évolutive**
-- Gestion de **gros volumes** de données grâce au **caching** et au support (partiel) de **Dask**.
-- Code **lisible**, **maintenable** et **extensible**
+### 3. Démarrage avec Docker
 
-## 🚀 Améliorations et Robustesse
-Cette version intègre des améliorations significatives pour garantir la stabilité et une expérience utilisateur de qualité professionnelle :
+Cette méthode est recommandée pour un environnement de production reproductible.
 
-- **Chargement de Données Sécurisé** : Le chargement des fichiers prévient les erreurs de type mixte (`DtypeWarning`) en inspectant et en convertissant intelligemment les colonnes problématiques. L'utilisateur est informé de ces conversions.
-- **Pipeline de ML Fiable** : L'entraînement des modèles est protégé contre les erreurs courantes :
-  - La **stratification** est automatiquement désactivée si une classe a trop peu d'échantillons.
-  - Le sur-échantillonnage **SMOTE** est remplacé par une méthode plus sûre (`RandomOverSampler`) lorsque la classe minoritaire est trop petite, évitant ainsi les crashs.
-  - Le calcul de l'**AUC ROC** est ignoré proprement si une seule classe est présente dans les données de test.
-- **Feedback Utilisateur Clair** : Des messages et des notes d'évaluation sont affichés dans l'interface et dans les rapports PDF pour expliquer toutes les décisions automatiques prises par l'application.
-- **Affichage Stable** : Les tableaux de données (`st.dataframe`, `AgGrid`) sont protégés contre les erreurs `pyarrow` en forçant une conversion en `str` des colonnes à types mixtes avant l'affichage.
+1.  **Assurez-vous que votre fichier `.env` est configuré.** Le `docker-compose.yml` l'utilisera.
 
-## 📌 Remarques
-Ce projet constitue une base solide pour développer un tableau de bord de data science, adapté aussi bien à l’entreprise qu’à la recherche ou l’enseignement.
+2.  **Lancez les services :**
+    - Pour lancer l'application, la base de données et MLflow :
+      ```bash
+      docker-compose up --build
+      ```
+    - L'application sera disponible sur `http://localhost:8501`.
+    - L'interface MLflow sera sur `http://localhost:5000`.
+
+## Utilisation de l'Application
+
+1.  **Accueil** : Chargez votre jeu de données (CSV, Parquet, Excel).
+2.  **Dashboard** : Explorez les données via les onglets (qualité, analyse univariée, corrélations, etc.).
+3.  **Entraînement** : Configurez votre expérimentation ML (cible, features, modèles) et lancez l'entraînement.
+4.  **Évaluation** : Comparez les modèles, analysez les métriques et visualisez les résultats détaillés.

@@ -21,6 +21,8 @@ matplotlib==3.8.3
 reportlab==4.1.0
 catboost==1.2.5
 psutil==5.9.8
-imblearn==1.15.3
-
-kaleido
+python-dotenv==0.21.0
+imbalanced-learn
+kaleido==0.2.1
+mlflow==2.8.1
+psycopg2-binary==2.9.9
