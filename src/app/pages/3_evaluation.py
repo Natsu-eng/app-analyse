@@ -1,4 +1,5 @@
 import os
+import pickle
 import numpy as np
 import streamlit as st
 import pandas as pd
@@ -10,8 +11,8 @@ from src.evaluation.model_plots import ModelEvaluationVisualizer
 from src.evaluation.metrics import get_system_metrics, EvaluationMetrics
 from utils.report_generator import generate_pdf_report
 from src.config.constants import TRAINING_CONSTANTS
-
 from logging import getLogger
+
 logger = getLogger(__name__)
 
 # Import MLflow
@@ -211,91 +212,57 @@ def calculate_clustering_metrics_cached(X, labels):
     except Exception as e:
         return {'error': str(e)}
 
-def display_model_details(evaluator, model_result, task_type):
-    """
-    Affiche les détails complets d'un modèle avec toutes les visualisations pertinentes.
+def model_has_predict_proba(model):
+    """Vérifie si le modèle supporte predict_proba"""
+    if model is None:
+        return False
+    if hasattr(model, 'named_steps'):
+        final_step = list(model.named_steps.values())[-1]
+        return hasattr(final_step, 'predict_proba')
+    return hasattr(model, 'predict_proba')
 
-    Args:
-        evaluator: Instance de ModelEvaluationVisualizer
-        model_result: Dictionnaire contenant les résultats du modèle
-        task_type: Type de tâche ('classification', 'regression', 'clustering')
-    """
+def display_model_details(evaluator, model_result, task_type):
+    """Affiche les détails complets d'un modèle avec visualisations"""
     model_name = model_result.get('model_name', 'Unknown')
     st.markdown(f"#### Détails du modèle: {model_name}")
 
-    # ============================================
-    # Section Debug (optionnelle en production)
-    # ============================================
     with st.expander("🔍 Debug - Données disponibles", expanded=False):
         available_keys = list(model_result.keys())
         st.write(f"**Clés disponibles:** {', '.join(available_keys)}")
-
-        data_status = {}
-        for key in ['X_test', 'y_test', 'X_train', 'y_train', 'X_sample', 'labels', 'model']:
-            value = model_result.get(key)
-            if value is not None:
-                if isinstance(value, (pd.DataFrame, pd.Series, np.ndarray)):
-                    shape = getattr(value, 'shape', (len(value),))
-                    data_status[key] = f"✅ Présent ({shape})"
-                else:
-                    data_status[key] = "✅ Présent"
-            else:
-                data_status[key] = "❌ Manquant"
-
+        data_status = {key: f"✅ Présent ({getattr(model_result.get(key), 'shape', (len(model_result.get(key)),))})" 
+                      if model_result.get(key) is not None and isinstance(model_result.get(key), (pd.DataFrame, pd.Series, np.ndarray)) 
+                      else "✅ Présent" if model_result.get(key) is not None else "❌ Manquant" 
+                      for key in ['X_test', 'y_test', 'X_train', 'y_train', 'X_sample', 'labels', 'model']}
         st.json(data_status)
 
-    # ============================================
-    # Métriques principales
-    # ============================================
     metrics = model_result.get('metrics', {})
     training_time = model_result.get('training_time', 0)
-
     st.markdown("**Métriques principales**")
     metrics_data = []
 
     if task_type == 'classification':
         metrics_data.extend([
-            {'Métrique': 'Accuracy', 'Valeur': f"{metrics.get('accuracy', 0):.3f}",
-             'Description': 'Proportion des prédictions correctes'},
-            {'Métrique': 'Precision', 'Valeur': f"{metrics.get('precision', 0):.3f}",
-             'Description': 'Précision des prédictions positives'},
-            {'Métrique': 'Recall', 'Valeur': f"{metrics.get('recall', 0):.3f}",
-             'Description': 'Rappel des vrais positifs'},
-            {'Métrique': 'F1-Score', 'Valeur': f"{metrics.get('f1_score', 0):.3f}",
-             'Description': 'Moyenne harmonique de précision et rappel'}
+            {'Métrique': 'Accuracy', 'Valeur': f"{metrics.get('accuracy', 0):.3f}", 'Description': 'Proportion des prédictions correctes'},
+            {'Métrique': 'Precision', 'Valeur': f"{metrics.get('precision', 0):.3f}", 'Description': 'Précision des prédictions positives'},
+            {'Métrique': 'Recall', 'Valeur': f"{metrics.get('recall', 0):.3f}", 'Description': 'Rappel des vrais positifs'},
+            {'Métrique': 'F1-Score', 'Valeur': f"{metrics.get('f1_score', 0):.3f}", 'Description': 'Moyenne harmonique de précision et rappel'}
         ])
     elif task_type == 'regression':
         metrics_data.extend([
-            {'Métrique': 'R² Score', 'Valeur': f"{metrics.get('r2', 0):.3f}",
-             'Description': 'Coefficient de détermination'},
-            {'Métrique': 'MAE', 'Valeur': f"{metrics.get('mae', 0):.3f}",
-             'Description': 'Erreur absolue moyenne'},
-            {'Métrique': 'RMSE', 'Valeur': f"{metrics.get('rmse', 0):.3f}",
-             'Description': 'Racine de l\'erreur quadratique moyenne'}
+            {'Métrique': 'R² Score', 'Valeur': f"{metrics.get('r2', 0):.3f}", 'Description': 'Coefficient de détermination'},
+            {'Métrique': 'MAE', 'Valeur': f"{metrics.get('mae', 0):.3f}", 'Description': 'Erreur absolue moyenne'},
+            {'Métrique': 'RMSE', 'Valeur': f"{metrics.get('rmse', 0):.3f}", 'Description': 'Racine de l\'erreur quadratique moyenne'}
         ])
     else:  # clustering
         metrics_data.extend([
-            {'Métrique': 'Silhouette Score', 'Valeur': f"{metrics.get('silhouette_score', 0):.3f}",
-             'Description': 'Qualité de la séparation des clusters'},
-            {'Métrique': 'Calinski-Harabasz', 'Valeur': f"{metrics.get('calinski_harabasz', 0):.3f}",
-             'Description': 'Ratio de dispersion entre et intra-clusters'},
-            {'Métrique': 'Davies-Bouldin', 'Valeur': f"{metrics.get('davies_bouldin_score', 0):.3f}",
-             'Description': 'Similitude moyenne entre clusters'},
-            {'Métrique': 'Nombre de Clusters', 'Valeur': f"{metrics.get('n_clusters', 'N/A')}",
-             'Description': 'Nombre de clusters formés'}
+            {'Métrique': 'Silhouette Score', 'Valeur': f"{metrics.get('silhouette_score', 0):.3f}", 'Description': 'Qualité de la séparation des clusters'},
+            {'Métrique': 'Calinski-Harabasz', 'Valeur': f"{metrics.get('calinski_harabasz', 0):.3f}", 'Description': 'Ratio de dispersion entre et intra-clusters'},
+            {'Métrique': 'Davies-Bouldin', 'Valeur': f"{metrics.get('davies_bouldin_score', 0):.3f}", 'Description': 'Similitude moyenne entre clusters'},
+            {'Métrique': 'Nombre de Clusters', 'Valeur': f"{metrics.get('n_clusters', 'N/A')}", 'Description': 'Nombre de clusters formés'}
         ])
+    metrics_data.append({'Métrique': 'Temps d\'entraînement (s)', 'Valeur': f"{training_time:.1f}", 'Description': 'Durée de l\'entraînement'})
+    st.dataframe(pd.DataFrame(metrics_data), width='stretch')
 
-    metrics_data.append({
-        'Métrique': 'Temps d\'entraînement (s)',
-        'Valeur': f"{training_time:.1f}",
-        'Description': 'Durée de l\'entraînement'
-    })
-
-    st.dataframe(pd.DataFrame(metrics_data), use_container_width=True)
-
-    # ============================================
-    # Récupération des données et du modèle
-    # ============================================
     model = model_result.get('model')
     X_test = model_result.get('X_test')
     y_test = model_result.get('y_test')
@@ -307,239 +274,189 @@ def display_model_details(evaluator, model_result, task_type):
 
     logger.info(f"📊 Affichage des détails pour {model_name}, task_type={task_type}")
 
-    # Helper function pour vérifier predict_proba
-    def model_has_predict_proba(model):
-        if model is None:
-            return False
-        if hasattr(model, 'named_steps'):
-            final_step = list(model.named_steps.values())[-1]
-            return hasattr(final_step, 'predict_proba')
-        return hasattr(model, 'predict_proba')
-
-    # ============================================
-    # Visualisations communes (Classification et Régression)
-    # ============================================
     if task_type in ['classification', 'regression'] and model:
-
-        # Importance des features
         if feature_names:
             st.markdown("#### Importance des Features")
             try:
                 feature_plot = evaluator.create_feature_importance_plot(model, feature_names)
                 if feature_plot:
-                    st.plotly_chart(feature_plot, use_container_width=True)
+                    st.plotly_chart(feature_plot, width='stretch')
                 else:
                     st.info("ℹ️ Importance des features non disponible pour ce type de modèle")
             except Exception as e:
                 st.warning(f"⚠️ Erreur importance features: {str(e)[:100]}")
                 logger.error(f"Erreur importance features {model_name}: {e}")
 
-        # Analyse SHAP
         if X_sample is not None and len(X_sample) > 0:
             st.markdown("#### Analyse SHAP")
             try:
                 shap_plot = evaluator.create_shap_plot(model_result)
                 if shap_plot:
-                    st.plotly_chart(shap_plot, use_container_width=True)
+                    st.plotly_chart(shap_plot, width='stretch')
                 else:
                     st.info("ℹ️ Analyse SHAP non disponible pour ce modèle")
             except Exception as e:
                 st.info(f"ℹ️ SHAP non disponible: {str(e)[:50]}")
                 logger.info(f"SHAP non disponible pour {model_name}: {e}")
 
-    # ============================================
-    # Visualisations spécifiques à la Classification
-    # ============================================
     if task_type == 'classification' and model:
-
         if X_test is not None and y_test is not None and len(X_test) > 0:
-
-            # Matrice de confusion
             st.markdown("#### Matrice de Confusion")
             try:
                 cm_plot = evaluator.create_confusion_matrix_plot(model_result)
                 if cm_plot:
-                    st.plotly_chart(cm_plot, use_container_width=True)
+                    st.plotly_chart(cm_plot, width='stretch')
                 else:
                     st.warning("⚠️ Impossible d'afficher la matrice de confusion")
             except Exception as e:
                 st.error(f"Erreur matrice de confusion: {str(e)[:100]}")
                 logger.error(f"Erreur confusion matrix {model_name}: {e}")
 
-            # Courbes basées sur predict_proba
             if model_has_predict_proba(model):
-
-                # Courbe ROC
                 st.markdown("#### Courbe ROC")
                 try:
                     roc_plot = evaluator.create_roc_curve_plot(model_result)
                     if roc_plot:
-                        st.plotly_chart(roc_plot, use_container_width=True)
+                        st.plotly_chart(roc_plot, width='stretch')
                     else:
                         st.info("ℹ️ Courbe ROC disponible uniquement pour classification binaire")
                 except Exception as e:
                     st.warning(f"⚠️ Erreur courbe ROC: {str(e)[:100]}")
                     logger.warning(f"Échec ROC pour {model_name}: {e}")
 
-                # Courbe Précision-Rappel
                 st.markdown("#### Courbe de Précision-Rappel")
                 try:
                     pr_plot = evaluator.create_precision_recall_curve_plot(model_result)
                     if pr_plot:
-                        st.plotly_chart(pr_plot, use_container_width=True)
+                        st.plotly_chart(pr_plot, width='stretch')
                     else:
                         st.info("ℹ️ Courbe PR disponible uniquement pour classification binaire")
                 except Exception as e:
                     st.warning(f"⚠️ Erreur courbe PR: {str(e)[:100]}")
 
-                # Distribution des probabilités
                 st.markdown("#### Distribution des Probabilités Prédites")
                 try:
                     proba_plot = evaluator.create_predicted_proba_distribution_plot(model_result)
                     if proba_plot:
-                        st.plotly_chart(proba_plot, use_container_width=True)
+                        st.plotly_chart(proba_plot, width='stretch')
                 except Exception as e:
                     st.warning(f"⚠️ Erreur distribution probabilités: {str(e)[:100]}")
-
             else:
                 st.info("ℹ️ Modèle ne supporte pas predict_proba - courbes ROC/PR non disponibles")
 
-        else:
-            st.warning("⚠️ Données de test manquantes pour les visualisations de classification")
-
-        # Courbe d'apprentissage
         if X_train is not None and y_train is not None and len(X_train) > 0:
-            st.markdown("#### Courbe d'Apprentissage")
-            try:
-                learning_plot = evaluator.create_learning_curve_plot(model_result)
-                if learning_plot:
-                    st.plotly_chart(learning_plot, use_container_width=True)
-            except Exception as e:
-                st.warning(f"⚠️ Erreur courbe d'apprentissage: {str(e)[:100]}")
+            with st.expander("#### 📈 Courbe d'Apprentissage", expanded=False):
+                try:
+                    learning_plot = evaluator.create_learning_curve_plot(model_result)
+                    if learning_plot:
+                        st.plotly_chart(learning_plot, width='stretch')
+                except Exception as e:
+                    st.warning(f"⚠️ Erreur courbe d'apprentissage: {str(e)[:100]}")
 
-        # Heatmap de corrélation (utilise X_sample déjà récupéré)
         if X_sample is not None and len(X_sample) > 0:
-            st.markdown("#### Heatmap de Corrélation des Features")
-            try:
-                temp_result = {**model_result, 'X_train': X_sample}
-                corr_plot = evaluator.create_feature_correlation_heatmap(temp_result)
-                if corr_plot:
-                    st.plotly_chart(corr_plot, use_container_width=True)
-            except Exception as e:
-                st.warning(f"⚠️ Erreur heatmap: {str(e)[:100]}")
+            with st.expander("#### 🔥 Heatmap de Corrélation des Features", expanded=False):
+                try:
+                    temp_result = {**model_result, 'X_train': X_sample}
+                    corr_plot = evaluator.create_feature_correlation_heatmap(temp_result)
+                    if corr_plot:
+                        st.plotly_chart(corr_plot, width='stretch')
+                except Exception as e:
+                    st.warning(f"⚠️ Erreur heatmap: {str(e)[:100]}")
 
-    # ============================================
-    # Visualisations spécifiques à la Régression
-    # ============================================
     if task_type == 'regression' and model:
-
         if X_test is not None and y_test is not None and len(X_test) > 0:
-
-            # Graphique des résidus
             st.markdown("#### Graphique des Résidus")
             try:
                 residuals_plot = evaluator.create_residuals_plot(model_result)
                 if residuals_plot:
-                    st.plotly_chart(residuals_plot, use_container_width=True)
+                    st.plotly_chart(residuals_plot, width='stretch')
             except Exception as e:
                 st.error(f"Erreur graphique résidus: {str(e)[:100]}")
 
-            # Prédictions vs Réelles
             st.markdown("#### Prédictions vs. Réelles")
             try:
                 pred_vs_actual_plot = evaluator.create_predicted_vs_actual_plot(model_result)
                 if pred_vs_actual_plot:
-                    st.plotly_chart(pred_vs_actual_plot, use_container_width=True)
+                    st.plotly_chart(pred_vs_actual_plot, width='stretch')
             except Exception as e:
                 st.error(f"Erreur prédictions vs. réelles: {str(e)[:100]}")
 
-        else:
-            st.warning("⚠️ Données de test manquantes pour les visualisations de régression")
-
-        # Courbe d'apprentissage
         if X_train is not None and y_train is not None and len(X_train) > 0:
-            st.markdown("#### Courbe d'Apprentissage")
-            try:
-                learning_plot = evaluator.create_learning_curve_plot(model_result)
-                if learning_plot:
-                    st.plotly_chart(learning_plot, use_container_width=True)
-            except Exception as e:
-                st.warning(f"⚠️ Erreur courbe d'apprentissage: {str(e)[:100]}")
+            with st.expander("#### 📈 Courbe d'Apprentissage", expanded=False):
+                try:
+                    learning_plot = evaluator.create_learning_curve_plot(model_result)
+                    if learning_plot:
+                        st.plotly_chart(learning_plot, width='stretch')
+                except Exception as e:
+                    st.warning(f"⚠️ Erreur courbe d'apprentissage: {str(e)[:100]}")
 
-    # ============================================
-    # Visualisations spécifiques au Clustering
-    # ============================================
     if task_type == 'clustering':
-
         if X_sample is not None and labels is not None and len(X_sample) > 0:
-
-            # Scatter plot des clusters
             st.markdown("#### Visualisation des Clusters")
             try:
                 cluster_plot = evaluator.create_cluster_scatter_plot(model_result)
                 if cluster_plot:
-                    st.plotly_chart(cluster_plot, use_container_width=True)
+                    st.plotly_chart(cluster_plot, width='stretch')
             except Exception as e:
                 st.error(f"Erreur scatter plot clusters: {str(e)[:100]}")
                 logger.error(f"Erreur cluster scatter {model_name}: {e}")
 
-            # Analyse de Silhouette
             st.markdown("#### Analyse de Silhouette")
             try:
                 silhouette_plot = evaluator.create_silhouette_plot(model_result)
                 if silhouette_plot:
-                    st.plotly_chart(silhouette_plot, use_container_width=True)
+                    st.plotly_chart(silhouette_plot, width='stretch')
             except Exception as e:
                 st.error(f"Erreur silhouette plot: {str(e)[:100]}")
                 logger.error(f"Erreur silhouette {model_name}: {e}")
 
-            # Dispersion intra-cluster
             st.markdown("#### Dispersion Intra-Cluster")
             try:
                 intra_cluster_plot = evaluator.create_intra_cluster_distance_plot(model_result)
                 if intra_cluster_plot:
-                    st.plotly_chart(intra_cluster_plot, use_container_width=True)
+                    st.plotly_chart(intra_cluster_plot, width='stretch')
             except Exception as e:
                 st.error(f"Erreur dispersion intra-cluster: {str(e)[:100]}")
                 logger.error(f"Erreur intra-cluster {model_name}: {e}")
-
         else:
             st.warning("⚠️ Données de clustering (X_sample, labels) manquantes pour les visualisations")
             logger.warning(f"X_sample ou labels manquant pour {model_name}")
 
-    # ============================================
-    # Footer
-    # ============================================
     st.markdown("---")
-    st.caption(f"📊 Visualisations générées pour {model_name}")
+    cv_scores = model_result.get('cv_scores')
+    if cv_scores is not None and isinstance(cv_scores, (list, np.ndarray)) and len(cv_scores) > 0:
+        cv_mean = np.mean(cv_scores)
+        cv_std = np.std(cv_scores)
+        st.caption(f"📊 Validation Croisée: {cv_mean:.3f} ± {cv_std:.3f}")
+    st.caption(f"📊 Visualisations générées pour {model_name} | ⏱️ Entraînement: {training_time:.2f}s")
+
+def get_mlflow_artifact(run_id, artifact_path, client):
+    """Récupère un artefact MLflow"""
+    try:
+        return client.download_artifacts(run_id, artifact_path)
+    except Exception as e:
+        logger.error(f"Erreur récupération artefact MLflow {run_id}: {e}")
+        return None
 
 def create_mlflow_run_plot(runs, task_type):
     """Crée un graphique de comparaison des runs MLflow"""
     try:
-        if not runs:
-            return None
+        # Vérification que task_type est une chaîne
+        if isinstance(task_type, list):
+            logger.warning("task_type est une liste, utilisation de la première valeur ou 'classification' par défaut")
+            task_type = task_type[0] if task_type else 'classification'
         
-        # Sélectionner la métrique principale
-        metric_key = (
-            'metrics.accuracy' if task_type == 'classification' else
-            'metrics.r2' if task_type == 'regression' else
-            'metrics.silhouette_score'
-        )
-        
-        # Préparer les données pour le graphique
-        plot_data = []
-        for run in runs:
-            if metric_key in run and run.get('status') == 'FINISHED':
-                plot_data.append({
-                    'Model': run.get('tags.mlflow.runName', 'Unknown'),
-                    'Metric': run.get(metric_key, 0),
-                    'Start Time': pd.to_datetime(run.get('start_time', 0), unit='ms'),
-                    'Run ID': run.get('run_id', 'N/A')
-                })
-        
+        metric_key = 'metrics.accuracy' if task_type == 'classification' else 'metrics.r2' if task_type == 'regression' else 'metrics.silhouette_score'
+        metric_label = 'Accuracy' if task_type == 'classification' else 'R² Score' if task_type == 'regression' else 'Silhouette Score'
+
+        plot_data = [
+            {'Model': run.get('tags.mlflow.runName', 'Unknown'), 'Metric': float(run.get(metric_key, 0)), 'Run ID': run.get('run_id', 'N/A')}
+            for run in runs if run.get(metric_key) is not None
+        ]
+
         if not plot_data:
             return None
-        
+
         df_plot = pd.DataFrame(plot_data)
         fig = px.bar(
             df_plot,
@@ -547,37 +464,179 @@ def create_mlflow_run_plot(runs, task_type):
             y='Metric',
             color='Metric',
             text='Metric',
-            title=f"Comparaison des Runs MLflow ({metric_key.split('.')[-1].title()})",
-            hover_data=['Run ID', 'Start Time'],
+            title=f"Comparaison des Runs MLflow ({metric_label})",
+            hover_data=['Run ID'],
             color_continuous_scale='Viridis'
         )
         fig.update_traces(texttemplate='%{text:.3f}', textposition='auto')
-        fig.update_layout(
-            xaxis_title="Modèle",
-            yaxis_title=metric_key.split('.')[-1].title(),
-            showlegend=False
-        )
+        fig.update_layout(xaxis_title="Modèle", yaxis_title=metric_label, showlegend=False, height=400)
         return fig
     except Exception as e:
         logger.error(f"Erreur création graphique MLflow: {e}")
         return None
 
-def get_mlflow_artifact(run_id, artifact_path, client):
-    """Récupère un artefact MLflow"""
-    try:
-        artifact_file = client.download_artifacts(run_id, artifact_path)
-        with open(artifact_file, 'rb') as f:
-            return f.read()
-    except Exception as e:
-        logger.warning(f"Échec récupération artefact {artifact_path} pour run {run_id}: {e}")
-        return None
+def display_mlflow_tab():
+    """Affiche l'onglet MLflow avec gestion d'erreurs robuste"""
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
+    st.markdown("### 🔗 Exploration des Runs MLflow")
+
+    if not MLFLOW_AVAILABLE:
+        st.error("🚫 MLflow non disponible")
+        st.info("Installez MLflow pour accéder aux runs (`pip install mlflow`).")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    if 'mlflow_runs' not in st.session_state or st.session_state.mlflow_runs is None:
+        st.session_state.mlflow_runs = []
+        st.warning("⚠️ Aucun run MLflow disponible")
+        st.info("Entraînez des modèles dans 'Configuration ML' pour générer des runs.")
+        if st.button("🔄 Initialiser MLflow runs"):
+            st.session_state.mlflow_runs = []
+            st.success("✅ mlflow_runs initialisé")
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    mlflow_runs = st.session_state.mlflow_runs
+    if not isinstance(mlflow_runs, list):
+        st.error(f"❌ Format des runs MLflow invalide: {type(mlflow_runs)}")
+        logger.error(f"mlflow_runs type incorrect: {type(mlflow_runs)}")
+        if st.button("🔄 Corriger le format"):
+            st.session_state.mlflow_runs = []
+            st.success("✅ Format corrigé")
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    if not mlflow_runs:
+        st.warning("⚠️ Liste des runs MLflow vide")
+        st.info("Entraînez des modèles pour générer des runs.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    first_run = mlflow_runs[0]
+    required_keys = ['run_id', 'status', 'start_time']
+    missing_keys = [key for key in required_keys if key not in first_run]
+    if missing_keys:
+        st.error(f"❌ Clés manquantes dans les runs: {missing_keys}")
+        st.json({"keys_disponibles": list(first_run.keys())})
+        logger.error(f"Run structure invalide. Keys: {list(first_run.keys())}")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    st.markdown(f"**📊 {len(mlflow_runs)} runs MLflow disponibles**")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        finished_runs = len([r for r in mlflow_runs if r.get('status') == 'FINISHED'])
+        st.metric("Runs Réussis", finished_runs)
+    with col2:
+        failed_runs = len([r for r in mlflow_runs if r.get('status') == 'FAILED'])
+        st.metric("Runs Échoués", failed_runs)
+    with col3:
+        if finished_runs > 0:
+            success_rate = (finished_runs / len(mlflow_runs)) * 100
+            st.metric("Taux de Réussite", f"{success_rate:.1f}%")
+
+    st.markdown("#### 📋 Filtrer les Runs")
+    col_filter1, col_filter2, col_filter3 = st.columns(3)
+    with col_filter1:
+        run_status = st.multiselect("Statut du Run", options=['FINISHED', 'FAILED', 'RUNNING'], default=['FINISHED'], key="mlflow_status_filter")
+    with col_filter2:
+        model_names = sorted(set(run.get('tags.mlflow.runName', 'Unknown').split('_')[0] for run in mlflow_runs))
+        selected_models = st.multiselect("Modèles", options=model_names, default=model_names, key="mlflow_model_filter")
+    with col_filter3:
+        available_metrics = set(k.split('.')[-1] for run in mlflow_runs for k in run.keys() if k.startswith('metrics.'))
+        sort_metric = st.selectbox("Trier par", options=['start_time'] + list(available_metrics), index=0, key="mlflow_sort_by")
+
+    filtered_runs = [run for run in mlflow_runs if run.get('status', 'UNKNOWN') in run_status and run.get('tags.mlflow.runName', 'Unknown').split('_')[0] in selected_models]
+    filtered_runs = sorted(filtered_runs, key=lambda x: x.get(f'metrics.{sort_metric}', x.get('start_time', 0)), reverse=sort_metric != 'start_time')
+    st.markdown(f"**{len(filtered_runs)} runs filtrés**")
+
+    if filtered_runs:
+        run_data = []
+        for run in filtered_runs:
+            metrics = {k.split('.')[-1]: v for k, v in run.items() if k.startswith('metrics.')}
+            params = {k.split('.')[-1]: v for k, v in run.items() if k.startswith('params.')}
+            run_id = run.get('run_id', 'N/A')
+            row = {
+                'Run ID': run_id[:8] + '...' if len(run_id) > 8 else run_id,
+                'Modèle': run.get('tags.mlflow.runName', 'Unknown'),
+                'Statut': run.get('status', 'UNKNOWN'),
+                'Date': pd.to_datetime(run.get('start_time', 0), unit='ms').strftime('%Y-%m-%d %H:%M:%S'),
+                **{k.title(): f"{v:.3f}" if isinstance(v, (int, float)) else v for k, v in metrics.items() if k in ['accuracy', 'f1_score', 'r2', 'mae', 'silhouette_score']}
+            }
+            run_data.append(row)
+
+        df_runs = pd.DataFrame(run_data)
+        st.markdown("#### 📊 Tableau des Runs MLflow")
+        st.dataframe(df_runs, width='stretch', height=400)
+
+        st.markdown("#### 📈 Comparaison des Performances")
+        try:
+            run_plot = create_mlflow_run_plot(filtered_runs, st.session_state.ml_results.get('task_type', 'classification'))
+            if run_plot:
+                st.plotly_chart(cached_plot(run_plot, "mlflow_run_plot"), width='stretch')
+            else:
+                st.warning("⚠️ Impossible de générer le graphique de comparaison")
+        except Exception as e:
+            st.warning(f"⚠️ Erreur graphique: {str(e)[:100]}")
+            logger.warning(f"Échec création graphique MLflow: {e}")
+
+        st.markdown("#### 🔍 Détails du Run")
+        selected_run_idx = st.selectbox(
+            "Sélectionner un Run",
+            options=range(len(filtered_runs)),
+            format_func=lambda x: f"{filtered_runs[x].get('tags.mlflow.runName', 'Unknown')} ({filtered_runs[x].get('status', 'UNKNOWN')})",
+            key="mlflow_run_selector"
+        )
+        if selected_run_idx is not None:
+            selected_run = filtered_runs[selected_run_idx]
+            st.markdown("**Informations du Run**")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Métriques**")
+                metrics = {k.split('.')[-1]: v for k, v in selected_run.items() if k.startswith('metrics.')}
+                st.json(metrics if metrics else {"info": "Aucune métrique disponible"})
+            with col2:
+                st.markdown("**Paramètres**")
+                params = {k.split('.')[-1]: v for k, v in selected_run.items() if k.startswith('params.')}
+                display_params = dict(list(params.items())[:20]) if params else {"info": "Aucun paramètre disponible"}
+                st.json(display_params)
+                if len(params) > 20:
+                    st.caption(f"... et {len(params) - 20} autres paramètres")
+            with st.expander("📋 Informations Complètes du Run", expanded=False):
+                st.json(selected_run)
+
+            if st.button("📥 Télécharger Artefacts", key=f"download_artifacts_{selected_run.get('run_id')}"):
+                artifact_data = get_mlflow_artifact(selected_run.get('run_id'), "model", MlflowClient())
+                if artifact_data:
+                    st.success("✅ Artefact téléchargé!")
+                else:
+                    st.error("❌ Erreur lors du téléchargement des artefacts")
+
+        if st.button("📥 Télécharger Runs CSV", key="download_mlflow_csv"):
+            try:
+                csv_data = pd.DataFrame(run_data).to_csv(index=False)
+                st.download_button(
+                    label="💾 Télécharger CSV",
+                    data=csv_data,
+                    file_name=f"mlflow_runs_{int(time.time())}.csv",
+                    mime="text/csv",
+                    width='stretch'
+                )
+            except Exception as e:
+                st.error(f"Erreur export CSV: {str(e)}")
+    else:
+        st.info("Aucun run ne correspond aux filtres sélectionnés")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def main():
+    """Fonction principale de la page d'évaluation"""
     if 'ml_results' not in st.session_state or not st.session_state.ml_results:
         st.error("🚫 Aucun résultat disponible")
         st.info("Entraînez des modèles dans 'Configuration ML'.")
-        if st.button("⚙️ Aller à Configuration ML", width='stretch'):
-            st.switch_page("pages/2_⚙️_Configuration_ML.py")
+        if st.button("⚙️ Aller à la page entrainement", width='stretch'):
+            st.switch_page("pages/2_training.py")
         return
 
     try:
@@ -594,10 +653,8 @@ def main():
         return
 
     display_metrics_header(validation)
-
-    # Ajout de l'onglet MLflow
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Vue d'Ensemble", "🔍 Détails", "📈 Métriques", "💾 Export", "🔗 MLflow"])
-    
+
     with tab1:
         st.markdown('<div class="tab-content">', unsafe_allow_html=True)
         if validation["successful_models"]:
@@ -610,7 +667,6 @@ def main():
             df_comparison = evaluator.get_comparison_dataframe()
             st.dataframe(df_comparison, width='stretch', height=400)
             
-            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
             st.markdown("### 📊 Résumé Statistique")
             col1, col2, col3 = st.columns(3)
             if validation["task_type"] in ['classification', 'regression']:
@@ -626,16 +682,13 @@ def main():
                             st.metric("Écart-type", f"{numeric_cols[main_metric].std():.3f}")
             elif validation["task_type"] == 'clustering':
                 with col1:
-                    avg_silhouette = np.mean([r.get('metrics', {}).get('silhouette_score', 0) 
-                                            for r in validation["successful_models"]])
+                    avg_silhouette = np.mean([r.get('metrics', {}).get('silhouette_score', 0) for r in validation["successful_models"]])
                     st.metric("Silhouette Moyen", f"{avg_silhouette:.3f}")
                 with col2:
-                    avg_clusters = np.mean([r.get('metrics', {}).get('n_clusters', 0) 
-                                          for r in validation["successful_models"]])
+                    avg_clusters = np.mean([r.get('metrics', {}).get('n_clusters', 0) for r in validation["successful_models"]])
                     st.metric("Clusters Moyen", f"{avg_clusters:.1f}")
                 with col3:
-                    best_silhouette = max([r.get('metrics', {}).get('silhouette_score', 0) 
-                                         for r in validation["successful_models"]])
+                    best_silhouette = max([r.get('metrics', {}).get('silhouette_score', 0) for r in validation["successful_models"]])
                     st.metric("Meilleur Silhouette", f"{best_silhouette:.3f}")
         else:
             st.warning("⚠️ Aucun modèle valide")
@@ -645,12 +698,11 @@ def main():
         st.markdown('<div class="tab-content">', unsafe_allow_html=True)
         st.markdown("### 🔍 Analyse Détaillée")
         if validation["successful_models"]:
-            model_names = [r.get('model_name', f'Modèle_{i}') 
-                         for i, r in enumerate(validation["successful_models"])]
+            model_names = [r.get('model_name', f'Modèle_{i}') for i, r in enumerate(validation["successful_models"])]
             selected_idx = st.selectbox(
                 "Modèle à analyser:",
                 range(len(model_names)),
-                format_func=lambda x: f"{model_names[x]} {'🏆' if model_names[x]==validation.get('best_model') else ''}",
+                format_func=lambda x: f"{model_names[x]} {'🏆' if model_names[x] == validation.get('best_model') else ''}",
                 key="model_selector_detail"
             )
             model_result = validation["successful_models"][selected_idx]
@@ -671,25 +723,21 @@ def main():
             st.markdown("#### 📋 Métriques par Catégorie")
             if validation["task_type"] == 'clustering':
                 st.markdown("**🎯 Qualité des Clusters**")
-                clustering_metrics = []
-                for result in validation["successful_models"]:
-                    metrics = result.get('metrics', {})
-                    silhouette = metrics.get('silhouette_score', 0)
-                    clustering_metrics.append({
-                        'Modèle': result.get('model_name', 'Unknown'),
-                        'Silhouette': f"{silhouette:.3f}",
-                        'Calinski-Harabasz': f"{metrics.get('calinski_harabasz', 0):.3f}",
-                        'Davies-Bouldin': f"{metrics.get('davies_bouldin_score', 0):.3f}",
-                        'Clusters': metrics.get('n_clusters', 'N/A'),
-                        'Qualité': '🟢 Excellente' if silhouette > 0.7 else '🟡 Bonne' if silhouette > 0.5 else '🟠 Moyenne' if silhouette > 0.3 else '🔴 Faible'
-                    })
+                clustering_metrics = [
+                    {
+                        'Modèle': r.get('model_name', 'Unknown'),
+                        'Silhouette': f"{r.get('metrics', {}).get('silhouette_score', 0):.3f}",
+                        'Calinski-Harabasz': f"{r.get('metrics', {}).get('calinski_harabasz', 0):.3f}",
+                        'Davies-Bouldin': f"{r.get('metrics', {}).get('davies_bouldin_score', 0):.3f}",
+                        'Clusters': r.get('metrics', {}).get('n_clusters', 'N/A'),
+                        'Qualité': '🟢 Excellente' if r.get('metrics', {}).get('silhouette_score', 0) > 0.7 else '🟡 Bonne' if r.get('metrics', {}).get('silhouette_score', 0) > 0.5 else '🟠 Moyenne' if r.get('metrics', {}).get('silhouette_score', 0) > 0.3 else '🔴 Faible'
+                    }
+                    for r in validation["successful_models"]
+                ]
                 st.dataframe(pd.DataFrame(clustering_metrics), width='stretch')
                 
                 st.markdown("**⏱️ Performance Computationnelle**")
-                perf_metrics = [
-                    {'Modèle': r.get('model_name'), 'Temps (s)': f"{r.get('training_time', 0):.1f}"}
-                    for r in validation["successful_models"]
-                ]
+                perf_metrics = [{'Modèle': r.get('model_name'), 'Temps (s)': f"{r.get('training_time', 0):.1f}"} for r in validation["successful_models"]]
                 st.dataframe(pd.DataFrame(perf_metrics), width='stretch')
             
             elif validation["task_type"] == 'classification':
@@ -707,10 +755,7 @@ def main():
                 st.dataframe(pd.DataFrame(class_metrics), width='stretch')
                 
                 st.markdown("**⏱️ Performance Computationnelle**")
-                perf_metrics = [
-                    {'Modèle': r.get('model_name'), 'Temps (s)': f"{r.get('training_time', 0):.1f}"}
-                    for r in validation["successful_models"]
-                ]
+                perf_metrics = [{'Modèle': r.get('model_name'), 'Temps (s)': f"{r.get('training_time', 0):.1f}"} for r in validation["successful_models"]]
                 st.dataframe(pd.DataFrame(perf_metrics), width='stretch')
             
             elif validation["task_type"] == 'regression':
@@ -727,10 +772,7 @@ def main():
                 st.dataframe(pd.DataFrame(reg_metrics), width='stretch')
                 
                 st.markdown("**⏱️ Performance Computationnelle**")
-                perf_metrics = [
-                    {'Modèle': r.get('model_name'), 'Temps (s)': f"{r.get('training_time', 0):.1f}"}
-                    for r in validation["successful_models"]
-                ]
+                perf_metrics = [{'Modèle': r.get('model_name'), 'Temps (s)': f"{r.get('training_time', 0):.1f}"} for r in validation["successful_models"]]
                 st.dataframe(pd.DataFrame(perf_metrics), width='stretch')
         else:
             st.warning("⚠️ Aucune métrique disponible")
@@ -764,8 +806,7 @@ def main():
             with col2:
                 st.markdown("#### 📈 Rapport Global")
                 if validation["best_model"]:
-                    best_model_result = next((r for r in validation["successful_models"] 
-                                           if r.get('model_name') == validation["best_model"]), None)
+                    best_model_result = next((r for r in validation["successful_models"] if r.get('model_name') == validation["best_model"]), None)
                     if best_model_result:
                         pdf_bytes = create_pdf_report_latex(best_model_result, validation["task_type"])
                         if pdf_bytes:
@@ -786,246 +827,7 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
 
     with tab5:
-        st.markdown('<div class="tab-content">', unsafe_allow_html=True)
-        st.markdown("### 🔗 Exploration des Runs MLflow")
-
-        if not MLFLOW_AVAILABLE:
-            st.error("🚫 MLflow non disponible")
-            st.info("Installez MLflow pour accéder aux runs (`pip install mlflow`).")
-            st.markdown('</div>', unsafe_allow_html=True)
-            return
-
-        # Initialiser mlflow_runs si None ou absent
-        if 'mlflow_runs' not in st.session_state or st.session_state.mlflow_runs is None:
-            st.session_state.mlflow_runs = []
-            st.warning("⚠️ Aucun run MLflow disponible")
-            st.info("Entraînez des modèles dans 'Configuration ML' pour générer des runs.")
-            st.markdown('</div>', unsafe_allow_html=True)
-            return
-
-        try:
-            mlflow_runs = st.session_state.mlflow_runs
-            client = MlflowClient()
-
-            # Filtrage des runs
-            st.markdown("#### 📋 Filtrer les Runs")
-            col_filter1, col_filter2, col_filter3 = st.columns(3)
-            with col_filter1:
-                run_status = st.multiselect(
-                    "Statut du Run",
-                    options=['FINISHED', 'FAILED', 'RUNNING'],
-                    default=['FINISHED'],
-                    key="mlflow_status_filter"
-                )
-            with col_filter2:
-                model_names = sorted(set(run.get('tags.mlflow.runName', 'Unknown') for run in mlflow_runs))
-                selected_models = st.multiselect(
-                    "Modèles",
-                    options=model_names,
-                    default=model_names,
-                    key="mlflow_model_filter"
-                )
-            with col_filter3:
-                sort_by = st.selectbox(
-                    "Trier par",
-                    options=['start_time', 'metrics.accuracy', 'metrics.r2', 'metrics.silhouette_score'],
-                    index=0,
-                    key="mlflow_sort_by"
-                )
-
-            # Filtrer les runs
-            filtered_runs = [
-                run for run in mlflow_runs
-                if run.get('status', 'UNKNOWN') in run_status
-                and run.get('tags.mlflow.runName', 'Unknown') in selected_models
-            ]
-
-            # Trier les runs
-            reverse_sort = sort_by != 'start_time'
-            filtered_runs = sorted(
-                filtered_runs,
-                key=lambda x: x.get(sort_by, 0) if sort_by != 'start_time' else x.get('start_time', 0),
-                reverse=reverse_sort
-            )
-
-            # Tableau interactif des runs
-            st.markdown("#### 📊 Tableau des Runs MLflow")
-            run_data = []
-            for run in filtered_runs:
-                metrics = {k.split('.')[-1]: v for k, v in run.items() if k.startswith('metrics.')}
-                params = {k.split('.')[-1]: v for k, v in run.items() if k.startswith('params.')}
-                run_data.append({
-                    'Run ID': run.get('run_id', 'N/A'),
-                    'Modèle': run.get('tags.mlflow.runName', 'Unknown'),
-                    'Statut': run.get('status', 'UNKNOWN'),
-                    'Date': pd.to_datetime(run.get('start_time', 0), unit='ms').strftime('%Y-%m-%d %H:%M:%S'),
-                    'start_time_raw': run.get('start_time', 0),  # Conserver la version brute pour tri
-                    **{k: f"{v:.3f}" if isinstance(v, (int, float)) else v for k, v in metrics.items()},
-                    **{k: v for k, v in params.items()}
-                })
-
-            if run_data:
-                df_runs = pd.DataFrame(run_data)
-                st.dataframe(df_runs, width='stretch', height=400)
-
-                # Graphique de comparaison des runs
-                st.markdown("#### 📈 Comparaison des Performances")
-                run_plot = create_mlflow_run_plot(filtered_runs, validation["task_type"])
-                if run_plot:
-                    st.plotly_chart(cached_plot(run_plot, "mlflow_run_plot"), width='stretch')
-                else:
-                    st.warning("⚠️ Impossible de générer le graphique de comparaison")
-                    logger.warning("Échec création graphique comparaison MLflow")
-
-                # Sélection d'un run pour détails
-                st.markdown("#### 🔍 Détails du Run")
-                selected_run_id = st.selectbox(
-                    "Sélectionner un Run",
-                    options=[run['run_id'] for run in filtered_runs],
-                    format_func=lambda x: f"Run {x} ({next((r['tags.mlflow.runName'] for r in filtered_runs if r['run_id'] == x), 'Unknown')})",
-                    key="mlflow_run_selector"
-                )
-
-                selected_run = next((run for run in filtered_runs if run['run_id'] == selected_run_id), None)
-                if selected_run:
-                    st.markdown("**Détails du Run**")
-                    with st.expander("📋 Métriques et Paramètres", expanded=True):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown("**Métriques**")
-                            metrics = {k.split('.')[-1]: v for k, v in selected_run.items() if k.startswith('metrics.')}
-                            st.json(metrics)
-                        with col2:
-                            st.markdown("**Paramètres**")
-                            params = {k.split('.')[-1]: v for k, v in selected_run.items() if k.startswith('params.')}
-                            st.json(params)
-
-                    # Visualisations spécifiques au run
-                    st.markdown("#### 📊 Visualisations")
-                    if validation["task_type"] == 'classification':
-                        # Essayer de récupérer la matrice de confusion sauvegardée
-                        cm_artifact = get_mlflow_artifact(selected_run_id, "confusion_matrix.pkl", client)
-                        if cm_artifact:
-                            st.markdown("**Matrice de Confusion**")
-                            cm_plot = evaluator.create_confusion_matrix_plot(pd.read_pickle(cm_artifact))
-                            if cm_plot:
-                                st.plotly_chart(cm_plot, width='stretch')
-                            else:
-                                st.warning("⚠️ Échec affichage matrice de confusion")
-
-                        # Courbe ROC
-                        roc_artifact = get_mlflow_artifact(selected_run_id, "roc_curve.pkl", client)
-                        if roc_artifact:
-                            st.markdown("**Courbe ROC**")
-                            roc_plot = evaluator.create_roc_curve_plot(pd.read_pickle(roc_artifact))
-                            if roc_plot:
-                                st.plotly_chart(roc_plot, width='stretch')
-                            else:
-                                st.warning("⚠️ Échec affichage courbe ROC")
-
-                    elif validation["task_type"] == 'regression':
-                        # Graphique des résidus
-                        residuals_artifact = get_mlflow_artifact(selected_run_id, "residuals_plot.pkl", client)
-                        if residuals_artifact:
-                            st.markdown("**Graphique des Résidus**")
-                            residuals_plot = evaluator.create_residuals_plot(pd.read_pickle(residuals_artifact))
-                            if residuals_plot:
-                                st.plotly_chart(residuals_plot, width='stretch')
-                            else:
-                                st.warning("⚠️ Échec affichage graphique des résidus")
-
-                        # Prédictions vs Réelles
-                        pred_vs_actual_artifact = get_mlflow_artifact(selected_run_id, "pred_vs_actual_plot.pkl", client)
-                        if pred_vs_actual_artifact:
-                            st.markdown("**Prédictions vs. Réelles**")
-                            pred_vs_actual_plot = evaluator.create_predicted_vs_actual_plot(pd.read_pickle(pred_vs_actual_artifact))
-                            if pred_vs_actual_plot:
-                                st.plotly_chart(pred_vs_actual_plot, width='stretch')
-                            else:
-                                st.warning("⚠️ Échec affichage graphique prédictions vs. réelles")
-
-                    elif validation["task_type"] == 'clustering':
-                        # Scatter plot des clusters
-                        cluster_artifact = get_mlflow_artifact(selected_run_id, "cluster_scatter_plot.pkl", client)
-                        if cluster_artifact:
-                            st.markdown("**Visualisation des Clusters**")
-                            cluster_plot = evaluator.create_cluster_scatter_plot(pd.read_pickle(cluster_artifact))
-                            if cluster_plot:
-                                st.plotly_chart(cluster_plot, width='stretch')
-                            else:
-                                st.warning("⚠️ Échec affichage scatter plot clusters")
-
-                        # Silhouette plot
-                        silhouette_artifact = get_mlflow_artifact(selected_run_id, "silhouette_plot.pkl", client)
-                        if silhouette_artifact:
-                            st.markdown("**Analyse de Silhouette**")
-                            silhouette_plot = evaluator.create_silhouette_plot(pd.read_pickle(silhouette_artifact))
-                            if silhouette_plot:
-                                st.plotly_chart(silhouette_plot, width='stretch')
-                            else:
-                                st.warning("⚠️ Échec affichage silhouette plot")
-
-                    # Téléchargement des artefacts
-                    st.markdown("#### 💾 Télécharger les Artefacts")
-                    artifact_list = client.list_artifacts(selected_run_id)
-                    if artifact_list:
-                        for artifact in artifact_list:
-                            if artifact.path.endswith(('.pkl', '.joblib')):
-                                artifact_data = get_mlflow_artifact(selected_run_id, artifact.path, client)
-                                if artifact_data:
-                                    st.download_button(
-                                        label=f"Télécharger {artifact.path}",
-                                        data=artifact_data,
-                                        file_name=artifact.path,
-                                        mime="application/octet-stream",
-                                        width='stretch'
-                                    )
-                    else:
-                        st.info("ℹ️ Aucun artefact disponible")
-
-                    # Déploiement du modèle
-                    st.markdown("#### 🚀 Déployer le Modèle")
-                    if st.button("Déployer via MLflow", key=f"deploy_{selected_run_id}"):
-                        try:
-                            run_info = client.get_run(selected_run_id)
-                            model_uri = f"runs:/{selected_run_id}/model"
-                            st.info(f"Commande de déploiement: `mlflow models serve -m {model_uri} --port 5000`")
-                            st.success("✅ Instruction de déploiement générée. Exécutez la commande dans votre terminal.")
-                        except Exception as e:
-                            st.error(f"❌ Échec préparation déploiement: {str(e)}")
-                            logger.error(f"Échec déploiement modèle {selected_run_id}: {e}")
-
-            else:
-                st.info("ℹ️ Aucun run filtré")
-
-            # Exportation des métriques MLflow
-            st.markdown("#### 📥 Exporter les Runs")
-            if filtered_runs:
-                csv_data = pd.DataFrame(run_data).to_csv(index=False)
-                st.download_button(
-                    label="📥 Télécharger Runs CSV",
-                    data=csv_data,
-                    file_name=f"mlflow_runs_{int(time.time())}.csv",
-                    mime="text/csv",
-                    width='stretch'
-                )
-
-        except Exception as e:
-            st.error(f"❌ Erreur chargement MLflow: {str(e)}")
-            logger.error(f"MLflow tab error: {e}")
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown("---")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.caption(f"🕐 Mis à jour: {time.strftime('%H:%M:%S')}")
-    with col2:
-        memory_info = get_system_metrics()
-        memory_status = "🟢" if memory_info['memory_percent'] < 70 else "🟡" if memory_info['memory_percent'] < 85 else "🔴"
-        st.caption(f"{memory_status} Mémoire: {memory_info['memory_percent']:.1f}%")
-    with col3:
-        st.caption(f"📊 Modèles: {len(st.session_state.ml_results)}")
+        display_mlflow_tab()
 
 if __name__ == "__main__":
     main()

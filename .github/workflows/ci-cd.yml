@@ -19,25 +19,26 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'  # Cache des dépendances pip
     
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install .[dev]  # Installer dépendances via pyproject.toml
         pip install pytest pytest-cov black flake8 mypy
     
     - name: Lint and Format Check
       run: |
-        flake8 src/ tests/
-        black --check --diff src/ tests/
+        flake8 src/ tests/ pages/
+        black --check --diff src/ tests/ pages/
     
     - name: Type Check
       run: |
-        mypy src/ tests/ --ignore-missing-imports
+        mypy src/ tests/ pages/ --ignore-missing-imports
 
     - name: Run tests
       run: |
-        pytest
+        pytest --cov=src --cov-report=xml --cov-report=term-missing
 
   build-and-push:
     needs: test
@@ -61,4 +62,6 @@ jobs:
       with:
         context: .
         push: true
-        tags: ${{ secrets.DOCKER_USERNAME }}/app-analyse:latest
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/app-analyse:latest
+          ${{ secrets.DOCKER_USERNAME }}/app-analyse:${{ github.sha }}

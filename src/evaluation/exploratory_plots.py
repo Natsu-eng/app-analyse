@@ -306,6 +306,42 @@ def _calculate_anova_score(df: pd.DataFrame, numeric_col: str, categorical_col: 
     except Exception:
         return 0.0
 
+
+@st.cache_data(ttl=1800, max_entries=20)
+def create_simple_correlation_heatmap(df: pd.DataFrame, max_cols=20) -> tuple:
+    """Version simple du heatmap pour les cas problématiques."""
+    try:
+        # Prendre seulement les colonnes numériques
+        numeric_cols = df.select_dtypes(include='number').columns.tolist()
+        
+        if len(numeric_cols) > max_cols:
+            # Prendre les colonnes avec le moins de valeurs manquantes
+            missing_rates = df[numeric_cols].isnull().mean()
+            numeric_cols = missing_rates.nsmallest(max_cols).index.tolist()
+        
+        if len(numeric_cols) < 2:
+            logger.warning("Pas assez de colonnes numériques pour le heatmap")
+            return None, numeric_cols
+            
+        # Calcul de corrélation simple
+        corr_matrix = df[numeric_cols].corr()
+        
+        fig = px.imshow(
+            corr_matrix,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale='RdBu',
+            range_color=[-1, 1],
+            title=f"Matrice de corrélation ({len(numeric_cols)} variables)"
+        )
+        
+        fig.update_layout(height=600)
+        return fig, numeric_cols
+        
+    except Exception as e:
+        logger.error(f"Simple heatmap failed: {e}")
+        return None, []
+
 @st.cache_data(ttl=3600, max_entries=5)  # Cache plus long, moins d'entrées
 def plot_correlation_heatmap(
     df: pd.DataFrame, 
@@ -317,22 +353,21 @@ def plot_correlation_heatmap(
     start_time = time.time()
     
     try:
-        # Validation basique du DataFrame
+        # Validation du DataFrame
         if df is None or df.empty or len(df.columns) == 0:
             logger.warning("DataFrame vide pour le heatmap")
             return None
 
         logger.info(f"Début génération heatmap - {len(df.columns)} colonnes, {len(df)} lignes")
 
-        # Sélection des colonnes numériques uniquement pour commencer simple
-        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        # Sélection des colonnes numériques
+        numeric_cols = df.select_dtypes(include='number').columns.tolist()
         
         # Exclusion des colonnes problématiques
         exclude_patterns = ['id', 'product', 'sku', 'code', 'index', 'unique']
         cols_to_exclude = [
             col for col in numeric_cols 
-            if (any(pattern in col.lower() for pattern in exclude_patterns) or 
-                df[col].nunique() > 1000)  # Seuil plus élevé
+            if any(pattern in col.lower() for pattern in exclude_patterns) or df[col].nunique() > 1000
         ]
         
         numeric_cols = [col for col in numeric_cols if col not in cols_to_exclude]
@@ -340,7 +375,6 @@ def plot_correlation_heatmap(
         # Gestion de la colonne cible
         if target_column and target_column in df.columns:
             if target_column not in numeric_cols:
-                # Convertir la cible si elle est catégorielle
                 try:
                     if task_type == "classification":
                         df[target_column] = pd.Categorical(df[target_column]).codes
@@ -349,9 +383,8 @@ def plot_correlation_heatmap(
                     logger.warning(f"Impossible de convertir la cible {target_column}: {e}")
         
         # Limiter le nombre de colonnes pour la performance
-        max_cols = 30  # Réduit pour la performance
+        max_cols = 30  
         if len(numeric_cols) > max_cols:
-            # Garder les colonnes les plus intéressantes (avec moins de valeurs manquantes)
             missing_rates = df[numeric_cols].isnull().mean()
             numeric_cols = missing_rates.nsmallest(max_cols).index.tolist()
             logger.info(f"Limite à {max_cols} colonnes sur {len(missing_rates)}")
@@ -363,27 +396,23 @@ def plot_correlation_heatmap(
         # Nettoyer les données avant calcul
         df_clean = df[numeric_cols].dropna()
         
-        if len(df_clean) < 10:  # Minimum de données
+        if len(df_clean) < 10:
             logger.warning("Pas assez de données après nettoyage")
             return None
 
-        # Calcul de corrélation simple et robuste
+        # Calcul de corrélation
         try:
             corr_matrix = df_clean.corr(method='pearson', numeric_only=True)
-            
-            # Vérifier que la matrice n'est pas vide
             if corr_matrix.empty or corr_matrix.isna().all().all():
                 logger.warning("Matrice de corrélation vide")
                 return None
                 
-            # Remplacer les NaN par 0 pour l'affichage
             corr_matrix = corr_matrix.fillna(0)
-            
         except Exception as e:
             logger.error(f"Erreur calcul corrélation: {e}")
             return None
 
-        # Création du heatmap simplifié
+        # Création du heatmap
         try:
             fig = go.Figure(data=go.Heatmap(
                 z=corr_matrix.values,
@@ -395,7 +424,7 @@ def plot_correlation_heatmap(
                 hoverinfo='z',
                 hovertemplate="<b>%{y}</b> vs <b>%{x}</b><br>Corrélation: %{z:.3f}<extra></extra>",
                 showscale=True,
-                text=corr_matrix.round(2).values,      # <-- Texte ajouté
+                text=corr_matrix.round(2).values,
                 texttemplate="%{text}"   
             ))
 
@@ -409,12 +438,11 @@ def plot_correlation_heatmap(
                 yaxis_title="Variables",
                 height=600,
                 width=800,
-                template="plotly_white",  # Template simple
+                template="plotly_white",
                 xaxis_tickangle=45,
                 margin=dict(l=50, r=50, t=80, b=50)
             )
 
-            # Améliorer la lisibilité
             fig.update_xaxes(tickfont=dict(size=10))
             fig.update_yaxes(tickfont=dict(size=10))
 

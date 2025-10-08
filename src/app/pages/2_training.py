@@ -1,3 +1,4 @@
+import mlflow
 import streamlit as st
 import pandas as pd
 import time
@@ -17,7 +18,6 @@ from src.config.constants import VALIDATION_CONSTANTS, PREPROCESSING_CONSTANTS, 
 # Configuration
 logger = get_logger(__name__)
 st.set_page_config(page_title="Configuration ML", page_icon="⚙️", layout="wide")
-
 
 def setup_ml_config_environment():
     """Configuration pour l'environnement de production ML"""
@@ -42,7 +42,6 @@ def setup_ml_config_environment():
         if is_mlflow_available():
             logger.info("MLflow est disponible pour le suivi des expériences")
             try:
-                import mlflow
                 mlflow.set_tracking_uri(MLFLOW_CONSTANTS["TRACKING_URI"])
                 logger.info("URI de suivi MLflow configuré avec succès")
                 experiment = mlflow.get_experiment_by_name(MLFLOW_CONSTANTS["EXPERIMENT_NAME"])
@@ -52,9 +51,7 @@ def setup_ml_config_environment():
             except Exception as e:
                 logger.warning(f"Échec de la configuration de l'URI MLflow : {e}")
 
-
 setup_ml_config_environment()
-
 
 def monitor_ml_operation(func):
     """Décorateur de monitoring"""
@@ -71,7 +68,6 @@ def monitor_ml_operation(func):
             logger.error(f"Échec de l'opération ML {func.__name__} : {e}")
             raise
     return wrapper
-
 
 def validate_clustering_features(df: pd.DataFrame, features: List[str]) -> Dict[str, Any]:
     """Valide que les features sont adaptées au clustering avec suggestions"""
@@ -120,7 +116,6 @@ def validate_clustering_features(df: pd.DataFrame, features: List[str]) -> Dict[
     
     return validation
 
-
 def estimate_training_time(df: pd.DataFrame, n_models: int, task_type: str, 
                          optimize_hp: bool, n_features: int, use_smote: bool = False) -> int:
     """Estime le temps d'entraînement de façon réaliste"""
@@ -140,7 +135,6 @@ def estimate_training_time(df: pd.DataFrame, n_models: int, task_type: str,
     except Exception as e:
         logger.warning(f"Erreur estimation temps : {e}")
         return 60
-
 
 def check_system_resources(df: pd.DataFrame, n_models: int) -> Dict[str, Any]:
     """Vérifie si le système a assez de ressources"""
@@ -174,7 +168,6 @@ def check_system_resources(df: pd.DataFrame, n_models: int) -> Dict[str, Any]:
         logger.warning(f"Erreur vérification ressources : {e}")
     
     return check_result
-
 
 @st.cache_data(ttl=300, max_entries=3)
 def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
@@ -230,7 +223,6 @@ def validate_dataframe_for_ml(df: pd.DataFrame) -> Dict[str, Any]:
     
     return validation
 
-
 def initialize_ml_config_state():
     """Initialise l'état de configuration ML"""
     defaults = {
@@ -265,7 +257,6 @@ def initialize_ml_config_state():
         if key not in st.session_state:
             st.session_state[key] = default_value
 
-
 @monitor_ml_operation
 def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
     """Détection sécurisée du type de tâche"""
@@ -291,7 +282,6 @@ def safe_get_task_type(df: pd.DataFrame, target_column: str) -> Dict[str, Any]:
         logger.error(f"Échec détection type tâche : {e}")
         return {"task_type": "unknown", "n_classes": 0, "error": str(e)}
 
-
 def get_task_specific_models(task_type: str) -> List[str]:
     """Retourne les modèles disponibles pour une tâche"""
     try:
@@ -299,7 +289,6 @@ def get_task_specific_models(task_type: str) -> List[str]:
     except Exception as e:
         logger.error(f"Erreur récupération modèles pour {task_type} : {e}")
         return []
-
 
 def get_default_models_for_task(task_type: str) -> List[str]:
     """Retourne les modèles par défaut pour une tâche"""
@@ -310,7 +299,6 @@ def get_default_models_for_task(task_type: str) -> List[str]:
     }
     available_models = get_task_specific_models(task_type)
     return [model for model in default_models.get(task_type, []) if model in available_models]
-
 
 # Interface principale
 st.title("⚙️ Configuration de l'Expérimentation ML")
@@ -557,7 +545,7 @@ if st.session_state.current_step == 1:
                     st.warning("⚠️ Nombre élevé de variables - risque de malédiction dimensionnelle")
                     st.info("Action : Activez PCA ou réduisez les variables.")
                 with st.expander("📈 Aperçu statistiques", expanded=False):
-                    st.dataframe(df[st.session_state.feature_list_for_ml_config].describe().style.format("{:.3f}"), use_container_width=True)
+                    st.dataframe(df[st.session_state.feature_list_for_ml_config].describe().style.format("{:.3f}"), width="stretch")
             else:
                 st.warning("⚠️ Aucune variable sélectionnée")
                 st.info("Action : Sélectionnez des variables numériques.")
@@ -600,6 +588,25 @@ elif st.session_state.current_step == 2:
             key="remove_id_checkbox",
             help="Élimine variables avec valeurs uniques (ID)"
         )
+
+        # Analyse des colonnes pour nettoyage
+        if st.session_state.preprocessing_choices['remove_constant_cols'] or st.session_state.preprocessing_choices['remove_identifier_cols']:
+            with st.spinner("Analyse des colonnes..."):
+                column_types = auto_detect_column_types(df)
+                # Filtrer les colonnes numériques avec tous les types numériques
+                numeric_cols = df.select_dtypes(include='number').columns
+                constant_cols = []
+                if len(numeric_cols) > 0:
+                    constant_cols = [col for col in numeric_cols if df[col].std() == 0]
+                else:
+                    st.warning("⚠️ Aucune colonne numérique détectée pour vérifier les colonnes constantes.")
+                    logger.warning("Aucune colonne numérique pour la vérification des colonnes constantes.")
+                
+                identifier_cols = [col for col in df.columns if df[col].nunique() == len(df)]
+                if constant_cols or identifier_cols:
+                    st.info(f"🧹 Nettoyage : {len(constant_cols)} colonnes constantes, {len(identifier_cols)} colonnes identifiantes détectées")
+                else:
+                    st.info("🧹 Aucune colonne constante ou identifiant détectée.")
     
     with col2:
         st.subheader("📏 Normalisation")
@@ -614,6 +621,18 @@ elif st.session_state.current_step == 2:
             key="scale_features_checkbox",
             help=scale_help.get(task_type, "Recommandé")
         )
+
+        if task_type in ['classification', 'regression']:
+            st.subheader("🔍 Réduction Dimensionnelle")
+            st.session_state.preprocessing_choices['pca_preprocessing'] = st.checkbox(
+                "Réduction dimension (PCA)",
+                value=st.session_state.preprocessing_choices.get('pca_preprocessing', False),
+                key="pca_preprocessing_checkbox_supervised",
+                help="Réduit le bruit pour données haute dimension"
+            )
+            if len(st.session_state.feature_list_for_ml_config) > TRAINING_CONSTANTS["MAX_FEATURES"]:
+                st.info("💡 PCA recommandé pour réduire le nombre de features.")
+
         if task_type == 'clustering' and not st.session_state.preprocessing_choices.get('scale_features', True):
             st.error("❌ Normalisation critique pour le clustering !")
             st.info("Action : Activez la normalisation pour de meilleurs résultats.")
@@ -623,24 +642,78 @@ elif st.session_state.current_step == 2:
             if st.session_state.target_column_for_ml_config:
                 imbalance_info = detect_imbalance(df, st.session_state.target_column_for_ml_config)
                 if imbalance_info.get("is_imbalanced", False):
-                    st.warning(f"📉 Déséquilibre (ratio : {imbalance_info.get('imbalance_ratio', 'N/A'):.2f})")
+                    st.warning(f"📉 Déséquilibre détecté (ratio : {imbalance_info.get('imbalance_ratio', 'N/A'):.2f})")
                     st.session_state.preprocessing_choices['use_smote'] = st.checkbox(
                         "Activer SMOTE",
                         value=st.session_state.preprocessing_choices.get('use_smote', True),
                         key="smote_checkbox",
-                        help="Équilibre les classes minoritaires"
+                        help="Génère des données synthétiques pour équilibrer les classes minoritaires"
                     )
+                    if st.session_state.preprocessing_choices['use_smote']:
+                        # Ajouter des options de configuration pour SMOTE
+                        with st.expander("⚙️ Paramètres SMOTE", expanded=False):
+                            st.session_state.preprocessing_choices['smote_k_neighbors'] = st.number_input(
+                                "Nombre de voisins (k)",
+                                min_value=1,
+                                max_value=20,
+                                value=st.session_state.preprocessing_choices.get('smote_k_neighbors', 5),
+                                step=1,
+                                key="smote_k_neighbors_input",
+                                help="Nombre de voisins utilisés pour générer les samples synthétiques"
+                            )
+                            st.session_state.preprocessing_choices['smote_sampling_strategy'] = st.selectbox(
+                                "Stratégie d'échantillonnage",
+                                options=['auto', 'minority', 'not minority', 'not majority', 'all'],
+                                index=['auto', 'minority', 'not minority', 'not majority', 'all'].index(
+                                    st.session_state.preprocessing_choices.get('smote_sampling_strategy', 'auto')
+                                ),
+                                key="smote_sampling_strategy_select",
+                                help="Détermine quelles classes rééquilibrer (auto = classe minoritaire)"
+                            )
+                            # Validation du nombre de samples dans la classe minoritaire
+                            min_class_count = min(df[st.session_state.target_column_for_ml_config].value_counts())
+                            if min_class_count < st.session_state.preprocessing_choices['smote_k_neighbors']:
+                                st.warning(
+                                    f"⚠️ Classe minoritaire trop petite ({min_class_count} samples) pour k={st.session_state.preprocessing_choices['smote_k_neighbors']}. "
+                                    "Réduisez k ou collectez plus de données."
+                                )
                 else:
                     st.success("✅ Classes équilibrées")
                     st.session_state.preprocessing_choices['use_smote'] = st.checkbox(
                         "SMOTE (optionnel)",
-                        value=False,
-                        key="smote_optional_checkbox"
+                        value=st.session_state.preprocessing_choices.get('use_smote', False),
+                        key="smote_optional_checkbox",
+                        help="Génère des données synthétiques même si les classes sont équilibrées"
                     )
+                    if st.session_state.preprocessing_choices['use_smote']:
+                        with st.expander("⚙️ Paramètres SMOTE", expanded=False):
+                            st.session_state.preprocessing_choices['smote_k_neighbors'] = st.number_input(
+                                "Nombre de voisins (k)",
+                                min_value=1,
+                                max_value=20,
+                                value=st.session_state.preprocessing_choices.get('smote_k_neighbors', 5),
+                                step=1,
+                                key="smote_k_neighbors_input_optional",
+                                help="Nombre de voisins utilisés pour générer les samples synthétiques"
+                            )
+                            st.session_state.preprocessing_choices['smote_sampling_strategy'] = st.selectbox(
+                                "Stratégie d'échantillonnage",
+                                options=['auto', 'minority', 'not minority', 'not majority', 'all'],
+                                index=['auto', 'minority', 'not minority', 'not majority', 'all'].index(
+                                    st.session_state.preprocessing_choices.get('smote_sampling_strategy', 'auto')
+                                ),
+                                key="smote_sampling_strategy_select_optional",
+                                help="Détermine quelles classes rééquilibrer (auto = classe minoritaire)"
+                            )
+                            min_class_count = min(df[st.session_state.target_column_for_ml_config].value_counts())
+                            if min_class_count < st.session_state.preprocessing_choices['smote_k_neighbors']:
+                                st.warning(
+                                    f"⚠️ Classe minoritaire trop petite ({min_class_count} samples) pour k={st.session_state.preprocessing_choices['smote_k_neighbors']}. "
+                                    "Réduisez k ou collectez plus de données."
+                                )
             else:
-                st.info("🔒 Variable cible requise")
+                st.info("🔒 Variable cible requise pour activer SMOTE")
                 st.session_state.preprocessing_choices['use_smote'] = False
-        
         elif task_type == 'clustering':
             st.subheader("🔍 Clustering")
             st.session_state.preprocessing_choices['pca_preprocessing'] = st.checkbox(
@@ -650,7 +723,8 @@ elif st.session_state.current_step == 2:
                 help="Réduit le bruit pour données haute dimension"
             )
 
-# Étape 3: Modèles
+
+# Dans Étape 3 : Sélection des Modèles
 elif st.session_state.current_step == 3:
     st.header("🤖 Sélection des Modèles")
     task_type = st.session_state.get('task_type', 'classification')
@@ -661,6 +735,7 @@ elif st.session_state.current_step == 3:
         st.info("Action : Vérifiez le catalogue de modèles.")
         st.stop()
     
+    # Sélection des modèles et configuration
     col1, col2 = st.columns([2, 1])
     with col1:
         st.subheader("🎯 Modèles")
@@ -677,23 +752,20 @@ elif st.session_state.current_step == 3:
         st.session_state.selected_models_for_training = selected_models
         
         if selected_models:
-            st.success(f"✅ {len(selected_models)} modèles sélectionnés")
+            if len(selected_models) > 5:
+                st.warning("⚠️ Maximum 5 modèles recommandés pour éviter une surcharge système.")
+                st.session_state.selected_models_for_training = selected_models[:5]
+            st.success(f"✅ {len(st.session_state.selected_models_for_training)} modèles sélectionnés")
             with st.expander("📋 Détails des modèles", expanded=False):
                 for model_name in selected_models:
                     model_config = MODEL_CATALOG[task_type].get(model_name, {})
                     st.write(f"**{model_name}**")
-                    st.caption(f"• {model_config.get('description', 'N/A')}")
-                    if task_type == 'clustering':
-                        if model_name == 'KMeans':
-                            st.caption("💡 Clusters sphériques, taille similaire")
-                        elif model_name == 'DBSCAN':
-                            st.caption("💡 Robustes au bruit, forme arbitraire")
-                        elif model_name == 'GaussianMixture':
-                            st.caption("💡 Probabiliste, taille variable")
+                    st.caption(f"• {model_config.get('description', 'Description non disponible')}")
         else:
             st.warning("⚠️ Aucun modèle sélectionné")
             st.info("Action : Sélectionnez au moins un modèle.")
-    
+            
+    # Configuration supplémentaire
     with col2:
         st.subheader("⚙️ Configuration")
         if task_type != 'clustering':
@@ -722,14 +794,13 @@ elif st.session_state.current_step == 3:
         
         if optimize_hp:
             st.warning("⏰ Temps d'entraînement +3-5x")
-            optimization_method = st.selectbox(
+            st.session_state.preprocessing_choices['optimization_method'] = st.selectbox(
                 "Méthode",
                 options=['Silhouette Score', 'Davies-Bouldin'] if task_type == 'clustering' else ['GridSearch', 'RandomSearch'],
                 index=0,
                 key="optimization_method_selector",
-                help="Silhouette=qualité clusters, GridSearch=exhaustif, RandomSearch=rapide"
+                help="Silhouette=qualité clusters, Davies-Bouldin=compacité, GridSearch=exhaustif, RandomSearch=rapide"
             )
-            st.session_state.optimization_method = optimization_method
         
         n_features = len(st.session_state.feature_list_for_ml_config)
         estimated_seconds = estimate_training_time(df, len(selected_models), task_type, optimize_hp, n_features, st.session_state.preprocessing_choices.get('use_smote', False))
@@ -801,7 +872,7 @@ elif st.session_state.current_step == 4:
     col_launch, col_reset = st.columns([2, 1])
     with col_launch:
         launch_disabled = len(config_issues) > 0 or st.session_state.get('ml_training_in_progress', False)
-        if st.button("🚀 Lancer", type="primary", use_container_width=True, disabled=launch_disabled):
+        if st.button("🚀 Lancer", type="primary", width='stretch', disabled=launch_disabled):
             st.session_state.ml_training_in_progress = True
             st.session_state.ml_last_training_time = time.time()
             
@@ -891,7 +962,7 @@ elif st.session_state.current_step == 4:
                 st.session_state.ml_error_count = st.session_state.get('ml_error_count', 0) + 1
                 status_text.text("❌ Échec")
                 progress_bar.progress(0)
-                st.error(f"❌ Erreur: {str(e)[:200]}")
+                st.error(f"❌ Erreur: {str(e)}")
                 st.info("Action: Vérifiez la configuration ou contactez le support.")
                 logger.error(f"Training failed: {e}", exc_info=True)
     
@@ -899,8 +970,10 @@ elif st.session_state.current_step == 4:
         if st.button("🔄 Reset", width='stretch'):
             ml_keys_to_reset = [
                 'target_column_for_ml_config', 'feature_list_for_ml_config',
-                'selected_models_for_training', 'ml_results', 'task_type',
-                'previous_task_type'
+                'selected_models_for_training', 'ml_results', 'task_type', 
+                'previous_task_type', 'test_split_for_ml_config', 'optimize_hp_for_ml_config',
+                'preprocessing_choices', 'ml_training_in_progress', 'ml_last_training_time', 
+                'ml_error_count', 'mlflow_runs', 'model_performance_history'
             ]
             for key in ml_keys_to_reset:
                 if key in st.session_state:
@@ -954,5 +1027,4 @@ if os.getenv("DEBUG_MODE", "false").lower() == "true":
             "test_split": st.session_state.get('test_split_for_ml_config'),
             "training_in_progress": st.session_state.get('ml_training_in_progress', False),
             "error_count": st.session_state.get('ml_error_count', 0)
-        })
-            
+        })  

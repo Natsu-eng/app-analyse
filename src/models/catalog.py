@@ -34,7 +34,7 @@ try:
 except ImportError:
     logging.warning("LightGBM non disponible - installation: pip install lightgbm")
 
-# Catalogue complet des modèles avec hyperparamètres optimisés
+# Catalogue complet des modèles avec hyperparamètres et descriptions
 MODEL_CATALOG = {
     "regression": {
         "Régression Linéaire": {
@@ -42,21 +42,24 @@ MODEL_CATALOG = {
             "params": {
                 "model__fit_intercept": [True, False],
                 "model__normalize": [True, False]
-            }
+            },
+            "description": "Modèle linéaire simple, adapté aux relations linéaires entre variables."
         },
         "Régression Ridge": {
             "model": Ridge(random_state=42),
             "params": {
                 "model__alpha": [0.1, 1.0, 10.0],
                 "model__solver": ['auto', 'svd', 'cholesky']
-            }
+            },
+            "description": "Régression linéaire avec régularisation L2, robuste aux variables corrélées."
         },
         "Régression Lasso": {
             "model": Lasso(random_state=42),
             "params": {
                 "model__alpha": [0.1, 1.0, 10.0],
                 "model__selection": ['cyclic', 'random']
-            }
+            },
+            "description": "Régression linéaire avec régularisation L1, favorise la sparsité des features."
         },
         "Forêt Aléatoire": {
             "model": RandomForestRegressor(random_state=42),
@@ -65,7 +68,8 @@ MODEL_CATALOG = {
                 "model__max_depth": [10, 20, None],
                 "model__min_samples_split": [2, 5],
                 "model__min_samples_leaf": [1, 2]
-            }
+            },
+            "description": "Ensemble d'arbres de décision, robuste aux données bruitées et hétérogènes."
         },
         "Gradient Boosting": {
             "model": GradientBoostingRegressor(random_state=42),
@@ -74,7 +78,8 @@ MODEL_CATALOG = {
                 "model__learning_rate": [0.05, 0.1, 0.2],
                 "model__max_depth": [3, 5, 7],
                 "model__subsample": [0.8, 1.0]
-            }
+            },
+            "description": "Boosting d'arbres, performant pour les relations complexes."
         },
         "SVM Regression": {
             "model": SVR(),
@@ -82,7 +87,8 @@ MODEL_CATALOG = {
                 "model__C": [0.1, 1.0, 10.0],
                 "model__kernel": ['linear', 'rbf'],
                 "model__gamma": ['scale', 'auto']
-            }
+            },
+            "description": "Support Vector Machine pour régression, efficace pour les datasets de petite taille."
         },
         "K Plus Proches Voisins": {
             "model": KNeighborsRegressor(),
@@ -90,7 +96,8 @@ MODEL_CATALOG = {
                 "model__n_neighbors": [3, 5, 7],
                 "model__weights": ['uniform', 'distance'],
                 "model__algorithm": ['auto', 'ball_tree', 'kd_tree']
-            }
+            },
+            "description": "Prédiction basée sur les voisins les plus proches, sensible à la normalisation."
         },
         "Arbre de Décision": {
             "model": DecisionTreeRegressor(random_state=42),
@@ -98,14 +105,16 @@ MODEL_CATALOG = {
                 "model__max_depth": [5, 10, 20, None],
                 "model__min_samples_split": [2, 5, 10],
                 "model__min_samples_leaf": [1, 2, 4]
-            }
+            },
+            "description": "Arbre unique, simple mais sujet au surapprentissage."
         },
         "AdaBoost": {
             "model": AdaBoostRegressor(random_state=42),
             "params": {
                 "model__n_estimators": [50, 100],
                 "model__learning_rate": [0.5, 1.0, 1.5]
-            }
+            },
+            "description": "Boosting d'arbres faibles, adapté aux datasets bruités."
         },
         "Réseau de Neurones": {
             "model": MLPRegressor(random_state=42, max_iter=1000),
@@ -113,7 +122,8 @@ MODEL_CATALOG = {
                 "model__hidden_layer_sizes": [(50,), (100,), (50, 50)],
                 "model__activation": ['relu', 'tanh'],
                 "model__alpha": [0.0001, 0.001, 0.01]
-            }
+            },
+            "description": "Réseau neuronal multicouche, puissant pour les données complexes."
         }
     },
     "classification": {
@@ -123,7 +133,8 @@ MODEL_CATALOG = {
                 "model__C": [0.1, 1.0, 10.0],
                 "model__penalty": ['l1', 'l2', 'elasticnet'],
                 "model__solver": ['liblinear', 'saga']
-            }
+            },
+            "description": "Modèle linéaire interprétable, adapté aux classifications binaires."
         },
         "Forêt Aléatoire": {
             "model": RandomForestClassifier(random_state=42),
@@ -133,7 +144,8 @@ MODEL_CATALOG = {
                 "model__min_samples_split": [2, 5],
                 "model__min_samples_leaf": [1, 2],
                 "model__class_weight": [None, 'balanced']
-            }
+            },
+            "description": "Ensemble d'arbres, robuste aux données bruitées et hétérogènes."
         },
         "Gradient Boosting": {
             "model": GradientBoostingClassifier(random_state=42),
@@ -141,7 +153,8 @@ MODEL_CATALOG = {
                 "model__n_estimators": [50, 100],
                 "model__learning_rate": [0.05, 0.1, 0.2],
                 "model__max_depth": [3, 5, 7]
-            }
+            },
+            "description": "Boosting d'arbres, performant pour les classifications complexes."
         },
         "SVM": {
             "model": SVC(random_state=42, probability=True),
@@ -149,7 +162,8 @@ MODEL_CATALOG = {
                 "model__C": [0.1, 1.0, 10.0],
                 "model__kernel": ['linear', 'rbf'],
                 "model__gamma": ['scale', 'auto']
-            }
+            },
+            "description": "Support Vector Machine, efficace pour les datasets de petite taille."
         },
         "K Plus Proches Voisins": {
             "model": KNeighborsClassifier(),
@@ -157,7 +171,8 @@ MODEL_CATALOG = {
                 "model__n_neighbors": [3, 5, 7],
                 "model__weights": ['uniform', 'distance'],
                 "model__algorithm": ['auto', 'ball_tree', 'kd_tree']
-            }
+            },
+            "description": "Classification basée sur les voisins, sensible à la normalisation."
         },
         "Arbre de Décision": {
             "model": DecisionTreeClassifier(random_state=42),
@@ -166,26 +181,30 @@ MODEL_CATALOG = {
                 "model__min_samples_split": [2, 5, 10],
                 "model__min_samples_leaf": [1, 2, 4],
                 "model__class_weight": [None, 'balanced']
-            }
+            },
+            "description": "Arbre unique, simple mais sujet au surapprentissage."
         },
         "AdaBoost": {
             "model": AdaBoostClassifier(random_state=42),
             "params": {
                 "model__n_estimators": [50, 100],
                 "model__learning_rate": [0.5, 1.0, 1.5]
-            }
+            },
+            "description": "Boosting d'arbres faibles, adapté aux datasets bruités."
         },
         "Naive Bayes Gaussien": {
             "model": GaussianNB(),
             "params": {
                 "model__var_smoothing": [1e-9, 1e-8, 1e-7]
-            }
+            },
+            "description": "Modèle probabiliste simple, efficace pour les données continues."
         },
         "Analyse Discriminante Linéaire": {
             "model": LinearDiscriminantAnalysis(),
             "params": {
                 "model__solver": ['svd', 'lsqr', 'eigen']
-            }
+            },
+            "description": "Classification linéaire, bonne pour les données linéairement séparables."
         },
         "Réseau de Neurones": {
             "model": MLPClassifier(random_state=42, max_iter=1000),
@@ -193,7 +212,8 @@ MODEL_CATALOG = {
                 "model__hidden_layer_sizes": [(50,), (100,), (50, 50)],
                 "model__activation": ['relu', 'tanh'],
                 "model__alpha": [0.0001, 0.001, 0.01]
-            }
+            },
+            "description": "Réseau neuronal multicouche, puissant pour les données complexes."
         }
     },
     "clustering": {
@@ -203,14 +223,16 @@ MODEL_CATALOG = {
                 "model__n_clusters": [2, 3, 4, 5, 6, 7, 8],
                 "model__init": ['k-means++', 'random'],
                 "model__algorithm": ['lloyd', 'elkan']
-            }
+            },
+            "description": "Clustering en clusters sphériques de taille similaire."
         },
         "DBSCAN": {
             "model": DBSCAN(),
             "params": {
                 "model__eps": [0.3, 0.5, 0.7, 1.0],
                 "model__min_samples": [5, 10, 15]
-            }
+            },
+            "description": "Clustering robuste au bruit, détecte des clusters de forme arbitraire."
         },
         "Clustering Hiérarchique": {
             "model": AgglomerativeClustering(),
@@ -218,21 +240,24 @@ MODEL_CATALOG = {
                 "model__n_clusters": [2, 3, 4, 5],
                 "model__linkage": ['ward', 'complete', 'average', 'single'],
                 "model__metric": ['euclidean', 'manhattan', 'cosine']
-            }
+            },
+            "description": "Construit une hiérarchie de clusters, flexible pour différentes formes."
         },
         "ACP (PCA)": {
             "model": PCA(random_state=42),
             "params": {
                 "model__n_components": [2, 3, 4, 0.95, 0.99],
                 "model__svd_solver": ['auto', 'full', 'arpack', 'randomized']
-            }
+            },
+            "description": "Réduction dimensionnelle, conserve les composantes principales."
         },
         "SVD Tronqué": {
             "model": TruncatedSVD(random_state=42),
             "params": {
                 "model__n_components": [2, 3, 4, 5],
                 "model__algorithm": ['arpack', 'randomized']
-            }
+            },
+            "description": "Réduction dimensionnelle pour matrices creuses ou grandes."
         }
     }
 }
@@ -246,7 +271,8 @@ if XGBRegressor:
             "model__max_depth": [3, 5, 7],
             "model__learning_rate": [0.05, 0.1, 0.2],
             "model__subsample": [0.8, 1.0]
-        }
+        },
+        "description": "Boosting d'arbres optimisé, performant pour les données structurées."
     }
 
 if XGBClassifier:
@@ -257,7 +283,8 @@ if XGBClassifier:
             "model__max_depth": [3, 5, 7],
             "model__learning_rate": [0.05, 0.1, 0.2],
             "model__subsample": [0.8, 1.0]
-        }
+        },
+        "description": "Boosting d'arbres optimisé, performant pour les classifications complexes."
     }
 
 if LGBMRegressor:
@@ -268,7 +295,8 @@ if LGBMRegressor:
             "model__num_leaves": [31, 50, 100],
             "model__learning_rate": [0.05, 0.1, 0.2],
             "model__subsample": [0.8, 1.0]
-        }
+        },
+        "description": "Boosting d'arbres rapide, efficace pour les grands datasets."
     }
 
 if LGBMClassifier:
@@ -279,7 +307,8 @@ if LGBMClassifier:
             "model__num_leaves": [31, 50, 100],
             "model__learning_rate": [0.05, 0.1, 0.2],
             "model__subsample": [0.8, 1.0]
-        }
+        },
+        "description": "Boosting d'arbres rapide, efficace pour les classifications complexes."
     }
 
 def get_model_config(task_type: str, model_name: str) -> Optional[Dict[str, Any]]:
@@ -292,22 +321,18 @@ def get_model_config(task_type: str, model_name: str) -> Optional[Dict[str, Any]
         Configuration du modèle ou None si non trouvé
     """
     try:
-        # Validation des entrées
         if not isinstance(task_type, str) or not isinstance(model_name, str):
             logging.error("Les paramètres 'task_type' et 'model_name' doivent être des chaînes.")
             return None
         
-        # Vérification du type de tâche
         if task_type not in MODEL_CATALOG:
             logging.error(f"Type de tâche non supporté: {task_type}")
             return None
         
-        # Vérification du nom du modèle
         if model_name not in MODEL_CATALOG[task_type]:
             logging.error(f"Modèle non trouvé: {model_name} pour {task_type}")
             return None
         
-        # Récupération de la configuration du modèle
         model_config = MODEL_CATALOG[task_type][model_name]
         logging.info(f"✅ Configuration récupérée pour le modèle '{model_name}' de type '{task_type}'")
         return model_config
@@ -331,20 +356,6 @@ def get_available_models(task_type: str) -> List[str]:
     except Exception as e:
         logging.error(f"Erreur récupération modèles disponibles: {e}")
         return []
-
-def get_model_categories() -> Dict[str, List[str]]:
-    """
-    Retourne les catégories de modèles disponibles.
-    
-    Returns:
-        Dictionnaire {catégorie: [modèles]}
-    """
-    categories = {}
-    
-    for task_type, models in MODEL_CATALOG.items():
-        categories[task_type] = list(models.keys())
-    
-    return categories
 
 def validate_model_selection(task_type: str, model_names: List[str]) -> Dict[str, Any]:
     """
@@ -377,11 +388,9 @@ def validate_model_selection(task_type: str, model_names: List[str]) -> Dict[str
     available_models = set(validation["available_models"])
     selected_models = set(model_names)
     
-    # Vérifier les modèles non disponibles
     unavailable_models = selected_models - available_models
     if unavailable_models:
         validation["warnings"].append(f"Modèles non disponibles: {unavailable_models}")
-        # Retirer les modèles non disponibles
         model_names = [m for m in model_names if m in available_models]
     
     if not model_names:

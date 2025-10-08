@@ -18,6 +18,7 @@ from src.data.data_analysis import (
     cleanup_memory
 )
 from src.evaluation.exploratory_plots import (
+    create_simple_correlation_heatmap,
     plot_overview_metrics,
     plot_missing_values_overview,
     plot_cardinality_overview,
@@ -47,6 +48,32 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+# CSS personnalisé pour un style moderne
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2rem;
+        color: #2c3e50;
+        text-align: center;
+        margin-bottom: 1.5rem;
+        font-weight: bold;
+    }
+    .tab-content {
+        padding: 1rem;
+        background: #f9f9f9;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+    .btn-primary {
+        background-color: #3498db;
+        color: white;
+    }
+    .btn-primary:hover {
+        background-color: #2980b9;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Constantes de configuration
 class Config:
@@ -397,6 +424,7 @@ tabs = st.tabs(["📈 Qualité", "🔬 Variables", "🔗 Relations", "🌐 Corr�
 
 # Onglet 1: Qualité des données
 with tabs[0]:
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
     st.subheader("📊 Qualité des Données")
     
     col1, col2 = st.columns(2)
@@ -422,9 +450,12 @@ with tabs[0]:
         except Exception as e:
             st.error("Erreur cardinalité")
             logger.error(f"Cardinality plot: {e}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Onglet 2: Analyse univariée
 with tabs[1]:
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
     st.subheader("🔍 Analyse Univariée")
     
     available_columns = list(df.columns)
@@ -503,8 +534,11 @@ with tabs[1]:
                 st.error(f"Erreur analyse de {selected_col}")
                 logger.error(f"Univariate analysis error for {selected_col}: {e}")
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
 # Onglet 3: Relations bivariées
 with tabs[2]:
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
     st.subheader("🔗 Relations entre Variables")
     
     available_columns = list(df.columns)
@@ -564,44 +598,11 @@ with tabs[2]:
     else:
         st.warning("Au moins 2 colonnes nécessaires")
 
-# Avant l'onglet qui suivent c'est une fonction de fallback pour afficher la corrélation 
-# Plus simple si dans pltos/exploratory ça plante
-import plotly.express as px
-def create_simple_correlation_heatmap(df, max_cols=20):
-    """Version ultra-simple du heatmap pour les cas problématiques"""
-    try:
-        # Prendre seulement les colonnes numériques
-        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-        
-        if len(numeric_cols) > max_cols:
-            # Prendre les colonnes avec le moins de valeurs manquantes
-            missing_rates = df[numeric_cols].isnull().mean()
-            numeric_cols = missing_rates.nsmallest(max_cols).index.tolist()
-        
-        if len(numeric_cols) < 2:
-            return None
-            
-        # Calcul de corrélation simple
-        corr_matrix = df[numeric_cols].corr()
-        
-        fig = px.imshow(
-            corr_matrix,
-            text_auto=".2f",
-            aspect="auto",
-            color_continuous_scale='RdBu',
-            range_color=[-1, 1],
-            title=f"Matrice de corrélation ({len(numeric_cols)} variables)"
-        )
-        
-        fig.update_layout(height=600)
-        return fig, numeric_cols
-        
-    except Exception as e:
-        logger.error(f"Simple heatmap failed: {e}")
-        return None
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Onglet 4: Corrélations - VERSION CORRIGÉE
 with tabs[3]:
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
     st.subheader("🌐 Matrice de Corrélations")
     
     # Options de configuration simplifiées
@@ -646,7 +647,6 @@ with tabs[3]:
                     st.success(f"✅ Matrice générée avec {len(used_cols)} variables")
                 else:
                     st.warning("❌ Impossible de générer la matrice")
-                    # Fallback ultime
                     st.info("Essayez avec le mode simple activé")
                     
             except Exception as e:
@@ -666,8 +666,11 @@ with tabs[3]:
                 except Exception as fallback_e:
                     st.error("Échec de toutes les méthodes")
 
-# Onglet 5: Aperçu données brutes - COMPLÉTÉ
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# Onglet 5: Aperçu données brutes
 with tabs[4]:
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
     st.subheader("📄 Aperçu des Données Brutes")
     
     try:
@@ -782,8 +785,11 @@ with tabs[4]:
             st.error("🚨 Impossible d'afficher les données")
             logger.error(f"Fallback preview also failed: {fallback_error}")
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
 # Onglet 6: Nettoyage des données 
 with tabs[5]:
+    st.markdown('<div class="tab-content">', unsafe_allow_html=True)
     st.subheader("🗑️ Nettoyage des Données")
     
     st.markdown("### 🔍 Détection des colonnes inutiles")
@@ -964,6 +970,8 @@ with tabs[5]:
                 st.rerun()
             except Exception as e:
                 st.error("❌ Erreur de rafraîchissement")
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Footer final avec informations système
 st.markdown("---")

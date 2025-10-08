@@ -832,12 +832,13 @@ class ModelEvaluationVisualizer:
 
     @monitor_evaluation_operation
     @timeout(seconds=180)
-    def create_shap_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+    def create_shap_plot(self, model_result: Dict[str, Any], max_samples: int = 100) -> go.Figure:
         """
         Crée un SHAP summary plot si SHAP est disponible.
         
         Args:
-            model_result: Résultat du modèle
+            model_result: Résultat du modèle contenant 'model', 'X_sample', et 'feature_names'
+            max_samples: Nombre maximum d'échantillons à utiliser pour SHAP (défaut: 100)
             
         Returns:
             Figure Plotly SHAP
@@ -864,7 +865,7 @@ class ModelEvaluationVisualizer:
             X_sample = np.array(X_sample)
             
             # Limitation pour performance
-            n_samples = min(50, len(X_sample))
+            n_samples = min(max_samples, len(X_sample))
             X_shap = X_sample[:n_samples]
             
             # Sélection de l'explainer
@@ -877,16 +878,16 @@ class ModelEvaluationVisualizer:
                     shap_values = explainer.shap_values(X_shap)
                     
                 elif hasattr(actual_model, 'coef_'):
-                    explainer = shap.LinearExplainer(actual_model, X_shap[:20])
+                    explainer = shap.LinearExplainer(actual_model, X_shap[:min(20, len(X_shap))])
                     shap_values = explainer.shap_values(X_shap)
                     
                 else:
-                    background = shap.sample(X_shap, min(10, len(X_shap)))
+                    background = shap.sample(X_shap, min(10, len(X_shap)), random_state=42)
                     explainer = shap.KernelExplainer(
                         actual_model.predict_proba if hasattr(actual_model, 'predict_proba') else actual_model.predict, 
                         background
                     )
-                    shap_values = explainer.shap_values(X_shap[:20])
+                    shap_values = explainer.shap_values(X_shap[:min(20, len(X_shap))])
                 
                 # Gestion des valeurs SHAP multi-classes
                 if isinstance(shap_values, list) and len(shap_values) > 0:
@@ -898,6 +899,7 @@ class ModelEvaluationVisualizer:
                 return self._create_custom_shap_plot(shap_values, X_shap[:len(shap_values)], feature_names)
                 
             except Exception as shap_error:
+                logger.error(f"Erreur calcul SHAP : {str(shap_error)}")
                 return _create_empty_plot(f"Erreur SHAP: {str(shap_error)[:100]}...")
             
         except Exception as e:
@@ -1437,8 +1439,8 @@ class ModelEvaluationVisualizer:
 
     from sklearn.model_selection import learning_curve
     @monitor_evaluation_operation
-    @timeout(seconds=120)
-    def create_learning_curve_plot(self, model_result):
+    @timeout(seconds=300)  # Augmenter à 300s pour grands datasets
+    def create_learning_curve_plot(self, model_result: Dict[str, Any]) -> go.Figure:
         """
         Crée une courbe d'apprentissage pour un modèle supervisé.
         Args:
@@ -1447,16 +1449,19 @@ class ModelEvaluationVisualizer:
             Figure Plotly de la courbe d'apprentissage
         """
         try:
-            from sklearn.model_selection import learning_curve
-
-            model = model_result.get('model')
-            X_train = model_result.get('X_train')
-            y_train = model_result.get('y_train')
-            task_type = model_result.get('task_type', 'classification')
-            model_name = model_result.get('model_name', 'Modèle')
+            model = _safe_get(model_result, ['model'])
+            X_train = _safe_get(model_result, ['X_train'])
+            y_train = _safe_get(model_result, ['y_train'])
+            task_type = _safe_get(model_result, ['task_type'], 'classification')
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
 
             if not all([model, X_train is not None, y_train is not None]):
-                return _create_empty_plot("Données manquantes pour la courbe d'apprentissage")
+                logger.warning("Données manquantes pour la courbe d'apprentissage")
+                return _create_empty_plot("Données manquantes (modèle, X_train ou y_train)")
+
+            # Convertir en formats compatibles
+            X_train = pd.DataFrame(X_train) if not isinstance(X_train, pd.DataFrame) else X_train
+            y_train = pd.Series(y_train) if not isinstance(y_train, pd.Series) else y_train.ravel()
 
             scoring = 'accuracy' if task_type == 'classification' else 'r2'
 
@@ -1467,7 +1472,8 @@ class ModelEvaluationVisualizer:
                 cv=5,
                 scoring=scoring,
                 n_jobs=-1,
-                train_sizes=np.linspace(0.1, 1.0, 10)
+                train_sizes=np.linspace(0.1, 1.0, 10),
+                random_state=42
             )
 
             train_mean = np.mean(train_scores, axis=1)
@@ -1494,9 +1500,9 @@ class ModelEvaluationVisualizer:
             ))
 
             fig.update_layout(
-                title=f"Courbe d'apprentissage - {model_name}",
+                title=f"Courbe d'Apprentissage - {model_name}",
                 xaxis_title="Taille de l'ensemble d'entraînement",
-                yaxis_title="Score",
+                yaxis_title=scoring.title(),
                 template="plotly_white",
                 height=500
             )
@@ -1506,7 +1512,7 @@ class ModelEvaluationVisualizer:
 
         except Exception as e:
             logger.error(f"❌ Courbe d'apprentissage échouée: {e}")
-            return _create_empty_plot(f"Erreur création courbe d'apprentissage: {str(e)}")
+            return _create_empty_plot(f"Erreur création courbe d'apprentissage: {str(e)[:100]}...")
         
     @monitor_evaluation_operation
     @timeout(seconds=90)
@@ -1597,6 +1603,74 @@ class ModelEvaluationVisualizer:
         except Exception as e:
             logger.error(f"❌ Création heatmap corrélations échouée: {e}")
             return _create_empty_plot(f"Erreur heatmap corrélations: {str(e)}")
+        
+    
+    @monitor_evaluation_operation
+    @timeout(seconds=120)
+    def create_elbow_curve_plot(self, model_result: Dict[str, Any]) -> go.Figure:
+        """
+        Crée une courbe du coude pour KMeans dans le clustering.
+        Args:
+            model_result: Résultat du modèle avec 'X_sample', 'model_name', 'metrics'
+        Returns:
+            Figure Plotly de la courbe du coude
+        """
+        try:
+            if not SKLEARN_AVAILABLE:
+                return _create_empty_plot("scikit-learn requis pour la courbe du coude")
+            
+            X = _safe_get(model_result, ['X_sample'])
+            model_name = _safe_get(model_result, ['model_name'], 'Modèle')
+            
+            if X is None or model_name != 'K-Means':
+                return _create_empty_plot("Données manquantes ou modèle non-KMeans")
+            
+            X = np.array(X)
+            if X.shape[0] < 2:
+                return _create_empty_plot("Trop peu de données pour la courbe du coude")
+            
+            from sklearn.cluster import KMeans
+            inertias = []
+            k_range = range(2, min(11, len(X)))
+            for k in k_range:
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                kmeans.fit(X)
+                inertias.append(kmeans.inertia_)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=list(k_range),
+                y=inertias,
+                mode='lines+markers',
+                line=dict(color='#3498db'),
+                name='Inertie'
+            ))
+            
+            n_clusters = _safe_get(model_result, ['metrics', 'n_clusters'])
+            if n_clusters:
+                idx = list(k_range).index(n_clusters) if n_clusters in k_range else None
+                if idx is not None:
+                    fig.add_trace(go.Scatter(
+                        x=[n_clusters], y=[inertias[idx]],
+                        mode='markers',
+                        marker=dict(size=12, color='red'),
+                        name='Clusters sélectionnés'
+                    ))
+            
+            fig.update_layout(
+                title=f"Courbe du Coude - {model_name}",
+                xaxis_title="Nombre de Clusters",
+                yaxis_title="Inertie",
+                template="plotly_white",
+                height=500
+            )
+            
+            logger.info(f"✅ Courbe du coude créée pour {model_name}")
+            return fig
+        
+        except Exception as e:
+            logger.error(f"❌ Courbe du coude échouée: {e}")
+            return _create_empty_plot(f"Erreur courbe du coude: {str(e)[:100]}...")
 
 
     @monitor_evaluation_operation
