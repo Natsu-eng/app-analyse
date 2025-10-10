@@ -35,7 +35,9 @@ TRAINING_CONSTANTS = {
     "MIN_NUMERIC_FEATURES": 2,
     "MAX_CLASSES": 100,
     "MAX_MISSING_RATIO": 0.5,
-    "MONITOR_TIME_THRESHOLD": 10
+    "MONITOR_TIME_THRESHOLD": 10,
+    "MONITOR_INTERVAL": 5,
+    "MAX_MODELS": 4
 }
 
 # Constantes pour la validation des données
@@ -71,6 +73,7 @@ VISUALIZATION_CONSTANTS = {
     "MAX_SAMPLES": 1000,
     "TRAIN_SIZES": [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
     "PLOTLY_TEMPLATE": "plotly_white",
+    "BAR_CHART_COLOR": "#3498db"
 }
 
 # Constantes pour la journalisation

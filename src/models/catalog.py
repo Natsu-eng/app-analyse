@@ -218,7 +218,7 @@ MODEL_CATALOG = {
     },
     "clustering": {
         "K-Means": {
-            "model": KMeans(random_state=42, n_init=10),
+            "model": KMeans(random_state=42, n_init=10, max_iter=300),
             "params": {
                 "model__n_clusters": [2, 3, 4, 5, 6, 7, 8],
                 "model__init": ['k-means++', 'random'],
@@ -230,7 +230,9 @@ MODEL_CATALOG = {
             "model": DBSCAN(),
             "params": {
                 "model__eps": [0.3, 0.5, 0.7, 1.0],
-                "model__min_samples": [5, 10, 15]
+                "model__min_samples": [5, 10, 15],
+                "model__metric": ['euclidean', 'manhattan', 'cosine'],
+                "model__algorithm": ['auto', 'ball_tree', 'kd_tree', 'brute']
             },
             "description": "Clustering robuste au bruit, détecte des clusters de forme arbitraire."
         },
